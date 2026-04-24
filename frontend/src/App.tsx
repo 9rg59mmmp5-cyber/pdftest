@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Play, CheckCircle, XCircle, Clock, RefreshCw, FileText, Settings, ListChecks, ArrowRight, ArrowLeft, Upload, ChevronLeft, ChevronRight, Maximize, Minimize, Trash2, ZoomIn, ZoomOut, Keyboard, BookOpen, Book, Plus, Crop, Highlighter, Hand, Check, X, Folder, FolderOpen, File, Home, List, Gamepad2, LogIn, LogOut, User, Pen, Eraser, MousePointer2, Smartphone, StickyNote, NotebookPen } from 'lucide-react';
 import localforage from 'localforage';
 import { v4 as uuidv4 } from 'uuid';
@@ -30,7 +30,54 @@ const OPTIMAL_DPR = (() => {
   return Math.min(2, Math.max(1.5, dpr));
 })();
 
-type Mode = 'setup' | 'taking' | 'grading' | 'results' | 'saved_questions' | 'saved_notes' | 'memorize' | 'ustasi';
+type Mode = 'setup' | 'taking' | 'grading' | 'results' | 'saved_questions' | 'saved_notes' | 'memorize' | 'ustasi' | 'analiz' | 'calisma';
+
+// ═══════════════════════════════════════════════════════════════════════
+// ⏱ ÇALIŞMA SAYACI — Types
+// ═══════════════════════════════════════════════════════════════════════
+type StudyMode = 'pomodoro' | 'desktime' | 'deepwork' | 'flexible';
+type StudyPhase = 'idle' | 'working' | 'break' | 'paused';
+
+interface StudyPreset {
+  id: StudyMode;
+  name: string;
+  icon: string;
+  workMin: number;
+  breakMin: number;
+  longBreakMin: number;
+  longBreakEvery: number;
+  description: string;
+}
+
+const STUDY_PRESETS: StudyPreset[] = [
+  { id: 'pomodoro', name: 'Pomodoro', icon: '🍅', workMin: 25, breakMin: 5, longBreakMin: 30, longBreakEvery: 4,
+    description: 'Klasik 25/5 — yeni başlayanlar ve dağılmış dikkate ideal (Cirillo, 1980)' },
+  { id: 'desktime', name: 'DeskTime', icon: '⚡', workMin: 52, breakMin: 17, longBreakMin: 30, longBreakEvery: 4,
+    description: 'En verimli %10\'un tekniği — orta zorluk (DeskTime, 2014)' },
+  { id: 'deepwork', name: 'Deep Work', icon: '🧠', workMin: 90, breakMin: 20, longBreakMin: 45, longBreakEvery: 2,
+    description: 'Ultradian ritim — derin odaklanma, KPSS için ideal (Schwartz/Newport)' },
+  { id: 'flexible', name: 'Esnek', icon: '🎯', workMin: 999, breakMin: 10, longBreakMin: 20, longBreakEvery: 4,
+    description: 'Süre sınırı yok — sen karar ver, mola istediğinde al' },
+];
+
+interface StudySession {
+  date: string; // YYYY-MM-DD
+  totalSeconds: number;
+  workBlocks: number; // Tamamlanan iş blokları
+  breaks: number;
+  mode: StudyMode;
+  timeline: Array<{ start: number; end: number; type: 'work' | 'break' }>; // Saat timestamp
+}
+
+interface StudyState {
+  phase: StudyPhase;
+  mode: StudyMode;
+  phaseStartedAt: number; // ms timestamp — o fazın başladığı an
+  accumulatedInPhase: number; // pause öncesi biriken saniye
+  completedWorkBlocks: number; // Bu oturumda tamamlanan
+  todayTotalSeconds: number; // Bugün toplam (her kayıt sonrası güncellenir)
+  todayDate: string; // YYYY-MM-DD — gün değişimini yakalamak için
+}
 
 interface SavedQuestion {
   id: string;
@@ -529,6 +576,422 @@ export default function App() {
   const [ustasiMaxNew, setUstasiMaxNew] = useState<number>(20); // Günlük yeni soru limiti
   const [ustasiShowStats, setUstasiShowStats] = useState<boolean>(false);
   const [ustasiAchievementToast, setUstasiAchievementToast] = useState<string | null>(null);
+
+  // ── Sınav tarihi (KPSS Önlisans için) ──────────────────────────────────
+  const [examDate, setExamDate] = useState<string>(''); // YYYY-MM-DD
+  useEffect(() => {
+    (async () => {
+      const d = await localforage.getItem<string>('exam_date');
+      if (d) setExamDate(d);
+    })();
+  }, []);
+  const persistExamDate = async (d: string) => {
+    await localforage.setItem('exam_date', d);
+    setExamDate(d);
+  };
+  const daysToExam = (): number | null => {
+    if (!examDate) return null;
+    const target = new Date(examDate).getTime();
+    const now = Date.now();
+    return Math.max(0, Math.ceil((target - now) / 86400000));
+  };
+  const examIntensity = (): 'normal' | 'orta' | 'yogun' | 'kritik' => {
+    const d = daysToExam();
+    if (d === null) return 'normal';
+    if (d < 30) return 'kritik';
+    if (d < 60) return 'yogun';
+    if (d < 100) return 'orta';
+    return 'normal';
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // ⏱ ÇALIŞMA SAYACI — State
+  // ═══════════════════════════════════════════════════════════════════════
+  const todayStr = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  };
+
+  const [studyState, setStudyState] = useState<StudyState>({
+    phase: 'idle',
+    mode: 'deepwork',
+    phaseStartedAt: 0,
+    accumulatedInPhase: 0,
+    completedWorkBlocks: 0,
+    todayTotalSeconds: 0,
+    todayDate: todayStr(),
+  });
+  const [studyHistory, setStudyHistory] = useState<StudySession[]>([]);
+  const [studyCustomGoal, setStudyCustomGoal] = useState<number>(0); // Dakika; 0 = adaptif
+  const [studyTelegramOn, setStudyTelegramOn] = useState<boolean>(true);
+  const [studyBrowserNotifOn, setStudyBrowserNotifOn] = useState<boolean>(true);
+  const [studyTick, setStudyTick] = useState(0); // Ticker — her saniye artar
+  const studyStateRef = useRef(studyState);
+  studyStateRef.current = studyState;
+
+  // Hedef (dakika) — sınav yaklaşımına göre adaptif + manuel override
+  const studyGoalMinutes = useMemo((): number => {
+    if (studyCustomGoal > 0) return studyCustomGoal;
+    if (!examDate) return 180;
+    const d = Math.max(0, Math.ceil((new Date(examDate).getTime() - Date.now()) / 86400000));
+    if (d < 30) return 360;    // 6 saat
+    if (d < 60) return 300;    // 5 saat
+    if (d < 100) return 240;   // 4 saat
+    return 180;                 // 3 saat
+  }, [studyCustomGoal, examDate]);
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 🐛 GLOBAL ERROR HANDLER — yakalanan tüm hataları sunucuya ilet
+  // ═══════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    const reportError = async (message: string, stack?: string, source?: string) => {
+      try {
+        const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+        await fetch(`${BASE}/client-error`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message, stack, userAgent: navigator.userAgent,
+            url: window.location.href, mode, component: source || 'global',
+          }),
+        });
+      } catch {}
+    };
+
+    const onError = (event: ErrorEvent) => {
+      reportError(event.message, event.error?.stack, 'window.onerror');
+    };
+    const onRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      const msg = typeof reason === 'string' ? reason : reason?.message || String(reason);
+      reportError(`Unhandled Promise: ${msg}`, reason?.stack, 'unhandledrejection');
+    };
+
+    window.addEventListener('error', onError);
+    window.addEventListener('unhandledrejection', onRejection);
+    return () => {
+      window.removeEventListener('error', onError);
+      window.removeEventListener('unhandledrejection', onRejection);
+    };
+  }, [mode]);
+
+  // İlk yüklemede localforage'dan state'i oku
+  useEffect(() => {
+    (async () => {
+      try {
+        const s = await localforage.getItem<StudyState>('study_state');
+        const h = await localforage.getItem<StudySession[]>('study_history');
+        const g = await localforage.getItem<number>('study_custom_goal');
+        const tg = await localforage.getItem<boolean>('study_telegram');
+        const bn = await localforage.getItem<boolean>('study_browser_notif');
+        
+        if (s) {
+          // Gün değişmiş mi kontrol — eğer evet dünkü toplamı history'ye ekle
+          if (s.todayDate !== todayStr()) {
+            if (s.todayTotalSeconds > 0 && h) {
+              const already = h.find(x => x.date === s.todayDate);
+              if (!already) {
+                h.push({
+                  date: s.todayDate,
+                  totalSeconds: s.todayTotalSeconds,
+                  workBlocks: s.completedWorkBlocks,
+                  breaks: 0,
+                  mode: s.mode,
+                  timeline: [],
+                });
+                await localforage.setItem('study_history', h);
+              }
+            }
+            // Bugün için sıfırla
+            const fresh: StudyState = {
+              ...s,
+              phase: 'idle',
+              phaseStartedAt: 0,
+              accumulatedInPhase: 0,
+              completedWorkBlocks: 0,
+              todayTotalSeconds: 0,
+              todayDate: todayStr(),
+            };
+            setStudyState(fresh);
+            await localforage.setItem('study_state', fresh);
+          } else {
+            // Aynı gün — eğer working/break fazındaysa, geçen süreyi hesaba kat
+            if (s.phase === 'working' || s.phase === 'break') {
+              const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
+              const newTotal = s.phase === 'working' 
+                ? s.todayTotalSeconds + Math.max(0, elapsed - s.accumulatedInPhase)
+                : s.todayTotalSeconds;
+              setStudyState({ ...s, todayTotalSeconds: newTotal });
+            } else {
+              setStudyState(s);
+            }
+          }
+        }
+        if (h) setStudyHistory(h);
+        if (typeof g === 'number') setStudyCustomGoal(g);
+        if (typeof tg === 'boolean') setStudyTelegramOn(tg);
+        if (typeof bn === 'boolean') setStudyBrowserNotifOn(bn);
+      } catch (e) {
+        console.error('study state load:', e);
+      }
+    })();
+  }, []);
+
+  // Persist — state değiştikçe localforage'a yaz
+  useEffect(() => {
+    localforage.setItem('study_state', studyState).catch(()=>{});
+  }, [studyState]);
+  useEffect(() => {
+    localforage.setItem('study_history', studyHistory).catch(()=>{});
+  }, [studyHistory]);
+  useEffect(() => {
+    localforage.setItem('study_custom_goal', studyCustomGoal).catch(()=>{});
+  }, [studyCustomGoal]);
+  useEffect(() => {
+    localforage.setItem('study_telegram', studyTelegramOn).catch(()=>{});
+  }, [studyTelegramOn]);
+  useEffect(() => {
+    localforage.setItem('study_browser_notif', studyBrowserNotifOn).catch(()=>{});
+  }, [studyBrowserNotifOn]);
+
+  // Ticker — her saniye bir render trigger (sayaç görünsün diye)
+  useEffect(() => {
+    if (studyState.phase === 'working' || studyState.phase === 'break') {
+      const t = setInterval(() => setStudyTick(v => v + 1), 1000);
+      return () => clearInterval(t);
+    }
+  }, [studyState.phase]);
+
+  // Gün değişimini yakala (örn 23:59 → 00:01 sırasında sayfa açıksa)
+  useEffect(() => {
+    const check = setInterval(() => {
+      const t = todayStr();
+      if (studyStateRef.current.todayDate !== t) {
+        setStudyState(s => {
+          // Dünkü'yü history'ye ekle
+          if (s.todayTotalSeconds > 0) {
+            setStudyHistory(h => {
+              if (h.find(x => x.date === s.todayDate)) return h;
+              return [...h, {
+                date: s.todayDate,
+                totalSeconds: s.todayTotalSeconds,
+                workBlocks: s.completedWorkBlocks,
+                breaks: 0,
+                mode: s.mode,
+                timeline: [],
+              }];
+            });
+          }
+          // Yeni gün — çalışma devam ediyorsa phase'i koruyoruz
+          if (s.phase === 'working') {
+            // Gece yarısını geçti — phaseStartedAt'i now'a çek ki yarının sayacı temiz başlasın
+            sendStudyNotif('🌅 Yeni gün başladı!', 'Sayaç sıfırlandı, çalışmaya devam edebilirsin.');
+            return {
+              ...s,
+              phaseStartedAt: Date.now(),
+              accumulatedInPhase: 0,
+              completedWorkBlocks: 0,
+              todayTotalSeconds: 0,
+              todayDate: t,
+            };
+          }
+          return { ...s, todayTotalSeconds: 0, todayDate: t, completedWorkBlocks: 0 };
+        });
+      }
+    }, 30000); // Her 30 sn kontrol
+    return () => clearInterval(check);
+  }, []);
+
+  // Browser notification izni
+  useEffect(() => {
+    if (studyBrowserNotifOn && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission().catch(()=>{});
+    }
+  }, [studyBrowserNotifOn]);
+
+  // Bildirim gönderici — browser + telegram
+  const sendStudyNotif = (title: string, body: string) => {
+    // Browser
+    if (studyBrowserNotifOn && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      try { new Notification(title, { body, icon: '/pdftest/icon.png', tag: 'study' }); } catch {}
+    }
+    // Telegram (backend üzerinden)
+    if (studyTelegramOn && user) {
+      (async () => {
+        try {
+          const token = await user.getIdToken();
+          const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+          await fetch(`${BASE}/study/notify`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ title, body }),
+          });
+        } catch {}
+      })();
+    }
+  };
+
+  // Çalışma başlat
+  const startStudyWork = () => {
+    const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
+    setStudyState(s => ({
+      ...s,
+      phase: 'working',
+      phaseStartedAt: Date.now(),
+      accumulatedInPhase: 0,
+    }));
+    sendStudyNotif(`${preset.icon} Çalışma Başladı`, `${preset.name}: ${preset.workMin} dk odak`);
+  };
+
+  // Mola başlat
+  const startStudyBreak = (long: boolean = false) => {
+    const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
+    // İş bloğu tamamlandı
+    setStudyState(s => {
+      const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
+      const workedNow = Math.max(0, elapsed - s.accumulatedInPhase);
+      return {
+        ...s,
+        phase: 'break',
+        phaseStartedAt: Date.now(),
+        accumulatedInPhase: 0,
+        completedWorkBlocks: s.completedWorkBlocks + 1,
+        todayTotalSeconds: s.todayTotalSeconds + workedNow,
+      };
+    });
+    const min = long ? preset.longBreakMin : preset.breakMin;
+    sendStudyNotif('☕ Mola zamanı', `${min} dk dinlen. Su iç, biraz yürü.`);
+  };
+
+  // Çalışmayı devam et (mola bitti)
+  const resumeStudyWork = () => {
+    const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
+    setStudyState(s => ({
+      ...s,
+      phase: 'working',
+      phaseStartedAt: Date.now(),
+      accumulatedInPhase: 0,
+    }));
+    sendStudyNotif(`${preset.icon} Devam`, `${preset.workMin} dk odaklanma başladı`);
+  };
+
+  // Pause (elle)
+  const pauseStudy = () => {
+    setStudyState(s => {
+      if (s.phase !== 'working' && s.phase !== 'break') return s;
+      const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
+      // Working ise çalışma süresini total'e ekle
+      const newTotal = s.phase === 'working' 
+        ? s.todayTotalSeconds + Math.max(0, elapsed - s.accumulatedInPhase)
+        : s.todayTotalSeconds;
+      return {
+        ...s,
+        phase: 'paused',
+        accumulatedInPhase: elapsed,
+        todayTotalSeconds: newTotal,
+      };
+    });
+  };
+
+  // Tamamen bitir — bugünkü oturumu kapat
+  const stopStudy = () => {
+    setStudyState(s => {
+      if (s.phase === 'working') {
+        const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
+        return {
+          ...s,
+          phase: 'idle',
+          phaseStartedAt: 0,
+          accumulatedInPhase: 0,
+          todayTotalSeconds: s.todayTotalSeconds + Math.max(0, elapsed - s.accumulatedInPhase),
+        };
+      }
+      return { ...s, phase: 'idle', phaseStartedAt: 0, accumulatedInPhase: 0 };
+    });
+    sendStudyNotif('⏹ Çalışma Durdu', 'Bugünlük güzel iş, yarın görüşürüz!');
+  };
+
+  // Otomatik phase geçişi — work bitti mi? break bitti mi?
+  useEffect(() => {
+    if (studyState.phase === 'idle' || studyState.phase === 'paused') return;
+    const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
+    const elapsedSec = Math.floor((Date.now() - studyState.phaseStartedAt) / 1000);
+    
+    if (studyState.phase === 'working') {
+      const targetSec = preset.workMin * 60;
+      if (preset.id !== 'flexible' && elapsedSec >= targetSec) {
+        // Uzun mola zamanı mı?
+        const nextBlockNumber = studyState.completedWorkBlocks + 1;
+        const isLongBreak = nextBlockNumber % preset.longBreakEvery === 0;
+        startStudyBreak(isLongBreak);
+      }
+    } else if (studyState.phase === 'break') {
+      const blocksDone = studyState.completedWorkBlocks;
+      const isLongBreak = blocksDone > 0 && blocksDone % preset.longBreakEvery === 0;
+      const breakTarget = (isLongBreak ? preset.longBreakMin : preset.breakMin) * 60;
+      if (elapsedSec >= breakTarget) {
+        sendStudyNotif('🔔 Mola bitti!', 'Tekrar çalışmaya başlayabilirsin.');
+        setStudyState(s => ({ ...s, phase: 'idle' }));
+      }
+    }
+  }, [studyTick, studyState.phase]);
+
+
+  // ── Analiz: zayıf konu / hata günlüğü hesapla ──────────────────────────
+  const analyzeStats = useMemo(() => {
+    type ConcreteStat = { subject: string; topic: string; total: number; wrong: number; lastReview: number };
+    const map = new Map<string, ConcreteStat>();
+    const errorBook: SavedQuestion[] = []; // En az 1 lapse olanlar
+
+    for (const q of savedQuestions) {
+      if (!q.correctAnswer || !q.srsReviewCount) continue;
+      const key = `${q.subject}|||${q.topic || 'Genel'}`;
+      const existing = map.get(key) || {
+        subject: q.subject, topic: q.topic || 'Genel', total: 0, wrong: 0, lastReview: 0
+      };
+      existing.total += 1;
+      if ((q.srsLapses || 0) > 0) {
+        existing.wrong += (q.srsLapses || 0);
+        if (!errorBook.find(e => e.id === q.id)) errorBook.push(q);
+      }
+      existing.lastReview = Math.max(existing.lastReview, q.srsLastReviewedAt || 0);
+      map.set(key, existing);
+    }
+
+    const allTopics = Array.from(map.values()).filter(t => t.total >= 2);
+    const weakest = [...allTopics]
+      .map(t => ({ ...t, errorRate: t.total > 0 ? t.wrong / t.total : 0 }))
+      .filter(t => t.errorRate > 0)
+      .sort((a, b) => b.errorRate - a.errorRate)
+      .slice(0, 10);
+
+    const strongest = [...allTopics]
+      .map(t => ({ ...t, errorRate: t.total > 0 ? t.wrong / t.total : 0 }))
+      .filter(t => t.errorRate < 0.2)
+      .sort((a, b) => a.errorRate - b.errorRate)
+      .slice(0, 10);
+
+    // Ders bazlı genel başarı
+    const bySubject: Record<string, { total: number; wrong: number; mastered: number }> = {};
+    for (const q of savedQuestions.filter(sq => sq.correctAnswer)) {
+      if (!bySubject[q.subject]) bySubject[q.subject] = { total: 0, wrong: 0, mastered: 0 };
+      bySubject[q.subject].total += 1;
+      if ((q.srsLapses || 0) > 0) bySubject[q.subject].wrong += 1;
+      if (q.srsStage === 'mastered') bySubject[q.subject].mastered += 1;
+    }
+
+    // Hata günlüğü: en sık hata yapılan sırayla
+    errorBook.sort((a, b) => (b.srsLapses || 0) - (a.srsLapses || 0));
+
+    return {
+      weakest, strongest, bySubject, errorBook,
+      totalQuestions: savedQuestions.filter(q => q.correctAnswer).length,
+      reviewedQuestions: savedQuestions.filter(q => q.srsReviewCount).length,
+      masteredCount: savedQuestions.filter(q => q.srsStage === 'mastered').length,
+      learningCount: savedQuestions.filter(q => q.srsStage === 'learning').length,
+    };
+  }, [savedQuestions]);
+
   const [gameModeQuestions, setGameModeQuestions] = useState<SavedQuestion[] | null>(null);
   const [currentGameQuestionIndex, setCurrentGameQuestionIndex] = useState(0);
   const [gameModeAnswers, setGameModeAnswers] = useState<Record<string, string>>({});
@@ -2284,7 +2747,6 @@ export default function App() {
   // Günlük görev — zamanı gelen sorular + yeni sorular
   const getUstasiQueue = (): SavedQuestion[] => {
     const now = Date.now();
-    // Sadece cevabı olan soruları çalışabiliriz
     const pool = savedQuestions.filter(q =>
       q.correctAnswer &&
       (ustasiFilterSubject === '__all__' || q.subject === ustasiFilterSubject)
@@ -2296,17 +2758,41 @@ export default function App() {
       return q.srsNextReview <= now;
     });
 
-    // Hiç denenmemiş yeni sorular
+    // Yeni sorular
     const newQuestions = pool.filter(q => !q.srsReviewCount);
 
-    // Maximum yeni: günlük limit
-    const newToAdd = newQuestions.slice(0, ustasiMaxNew);
+    // ── ADAPTIF: Sınav yaklaştıkça hata günlüğü ekstra ekle ──
+    // kritik (<30 gün): tüm hatalı sorular her oturumda tekrar
+    // yogun (<60 gün): %50'si tekrar
+    // orta (<100 gün): %30'u
+    // normal (>=100 gün): standart SM-2
+    const intensity = examIntensity();
+    const errorPool = pool.filter(q =>
+      (q.srsLapses || 0) > 0 &&
+      // Çift eklememek için sadece due olmayanları al
+      !dueQuestions.find(d => d.id === q.id)
+    );
+    let extraErrors: SavedQuestion[] = [];
+    if (intensity === 'kritik') {
+      extraErrors = [...errorPool];
+    } else if (intensity === 'yogun') {
+      extraErrors = errorPool.filter(() => Math.random() < 0.5);
+    } else if (intensity === 'orta') {
+      extraErrors = errorPool.filter(() => Math.random() < 0.3);
+    }
 
-    // Önce due, sonra yeni — karıştır ama due'lar önce
+    // Yeni soru limiti — sınav yaklaştıkça yeni daha az, tekrar daha çok
+    let maxNew = ustasiMaxNew;
+    if (intensity === 'kritik') maxNew = Math.max(5, Math.floor(ustasiMaxNew / 3));
+    else if (intensity === 'yogun') maxNew = Math.max(8, Math.floor(ustasiMaxNew / 2));
+
+    const newToAdd = newQuestions.slice(0, maxNew);
+
     const shuffledDue = [...dueQuestions].sort(() => Math.random() - 0.5);
+    const shuffledExtra = [...extraErrors].sort(() => Math.random() - 0.5);
     const shuffledNew = [...newToAdd].sort(() => Math.random() - 0.5);
 
-    return [...shuffledDue, ...shuffledNew];
+    return [...shuffledDue, ...shuffledExtra, ...shuffledNew];
   };
 
   const startUstasi = () => {
@@ -2794,6 +3280,30 @@ export default function App() {
               {todayMemorizeCards.length > 0 && (
                 <span className="text-[10px] bg-rose-600 text-white px-1.5 py-0.5 rounded-full font-bold animate-pulse">{todayMemorizeCards.length}</span>
               )}
+            </button>
+            <button
+              onClick={() => setMode('analiz')}
+              className="px-2.5 py-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 rounded-lg transition-all flex items-center gap-1.5 border border-transparent hover:border-slate-700/50"
+              title="Analiz, hata günlüğü, sınav geri sayımı"
+            >
+              <span className="text-base leading-none">📊</span>
+              <span className="text-xs font-medium tracking-wide">Analiz</span>
+              {analyzeStats.errorBook.length > 0 && (
+                <span className="text-[10px] bg-amber-600 text-white px-1.5 py-0.5 rounded-full font-bold">{analyzeStats.errorBook.length}</span>
+              )}
+            </button>
+            <button
+              onClick={() => setMode('calisma')}
+              className={`px-2.5 py-1.5 rounded-lg transition-all flex items-center gap-1.5 border ${
+                (studyState.phase === 'working' || studyState.phase === 'break')
+                  ? 'text-emerald-300 bg-emerald-900/30 border-emerald-700/40 animate-pulse'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border-transparent hover:border-slate-700/50'
+              }`}
+              title="Çalışma sayacı, Pomodoro/Deep Work"
+            >
+              <span className="text-base leading-none">⏱</span>
+              <span className="text-xs font-medium tracking-wide">Çalışma</span>
+              {studyState.phase === 'working' && <span className="text-[9px] bg-emerald-600 text-white px-1.5 py-0.5 rounded-full font-bold">ON</span>}
             </button>
             <button
               onClick={() => { setShowTrackingModal(true); loadTrackingData(); }}
@@ -6714,6 +7224,639 @@ export default function App() {
 
   // Ezber tekrar ekranı — flashcard (ön yüz → tıkla arka yüz → SM-2 butonları)
   // ═══════════════════════════════════════════════════════════════════════
+  // ⏱ ÇALIŞMA SAYACI — Render
+  // ═══════════════════════════════════════════════════════════════════════
+  const renderCalisma = () => {
+    const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
+    const now = Date.now();
+    
+    // Mevcut fazdaki geçen/kalan süre
+    let phaseElapsed = 0;
+    let phaseTarget = 0;
+    let phaseRemaining = 0;
+    if (studyState.phase === 'working' || studyState.phase === 'break') {
+      phaseElapsed = Math.floor((now - studyState.phaseStartedAt) / 1000);
+      const isLongBreak = studyState.phase === 'break' && 
+        studyState.completedWorkBlocks > 0 && 
+        studyState.completedWorkBlocks % preset.longBreakEvery === 0;
+      if (studyState.phase === 'working') {
+        phaseTarget = preset.id === 'flexible' ? 0 : preset.workMin * 60;
+      } else {
+        phaseTarget = (isLongBreak ? preset.longBreakMin : preset.breakMin) * 60;
+      }
+      phaseRemaining = Math.max(0, phaseTarget - phaseElapsed);
+    } else if (studyState.phase === 'paused') {
+      phaseElapsed = studyState.accumulatedInPhase;
+      phaseTarget = preset.workMin * 60;
+      phaseRemaining = Math.max(0, phaseTarget - phaseElapsed);
+    }
+
+    // Bugünün gerçek anlık toplamı (aktif çalışma varsa ekle)
+    const liveTotal = studyState.todayTotalSeconds + 
+      (studyState.phase === 'working' 
+        ? Math.max(0, phaseElapsed - studyState.accumulatedInPhase) 
+        : 0);
+    const goalSec = studyGoalMinutes * 60;
+    const goalProgress = Math.min(100, (liveTotal / goalSec) * 100);
+
+    const formatMMSS = (sec: number) => {
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    };
+    const formatHMS = (sec: number) => {
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      if (h > 0) return `${h}s ${m}dk`;
+      return `${m}dk`;
+    };
+
+    const todayBlocksLabel = studyState.completedWorkBlocks > 0
+      ? `${studyState.completedWorkBlocks} blok tamamlandı`
+      : 'Henüz blok yok';
+
+    // Son 7 gün
+    const last7 = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - (6 - i));
+      const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      const rec = key === studyState.todayDate
+        ? { date: key, totalSeconds: liveTotal }
+        : studyHistory.find(h => h.date === key) || { date: key, totalSeconds: 0 };
+      return { ...rec, dayLabel: ['Pzt','Sal','Çar','Per','Cum','Cmt','Paz'][(d.getDay() + 6) % 7] };
+    });
+    const weekTotal = last7.reduce((s, d) => s + d.totalSeconds, 0);
+    const weekAvg = Math.floor(weekTotal / 7);
+    const maxDaySec = Math.max(goalSec, ...last7.map(d => d.totalSeconds));
+
+    // Streak
+    const computeStreak = () => {
+      let streak = 0;
+      const threshold = 60 * 60; // en az 1 saat sayılır
+      for (let i = 0; i < 365; i++) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+        const total = key === studyState.todayDate 
+          ? liveTotal 
+          : (studyHistory.find(h => h.date === key)?.totalSeconds || 0);
+        if (total >= threshold) streak++;
+        else if (i > 0) break;
+      }
+      return streak;
+    };
+    const streak = computeStreak();
+
+    const isRunning = studyState.phase === 'working' || studyState.phase === 'break';
+
+    return (
+      <div className="min-h-[100dvh] bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex flex-col animate-in fade-in duration-300">
+        {/* Header */}
+        <div className="sticky top-0 z-10 bg-slate-950/90 backdrop-blur-xl border-b border-slate-800 px-3 py-2.5 flex items-center justify-between">
+          <button onClick={() => setMode('setup')} className="text-slate-400 hover:text-white p-1.5 rounded-lg bg-slate-800/60">
+            <Home size={16} />
+          </button>
+          <h1 className="text-base font-bold text-white flex items-center gap-1.5">⏱ Çalışma Sayacı</h1>
+          <div className="w-7" />
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-3 space-y-3">
+          {/* Aktif faz — büyük sayaç */}
+          <div className={`rounded-3xl p-6 border-2 transition-all ${
+            studyState.phase === 'working' 
+              ? 'bg-gradient-to-br from-emerald-950/60 to-green-950/40 border-emerald-500/40 shadow-lg shadow-emerald-900/30' 
+              : studyState.phase === 'break' 
+              ? 'bg-gradient-to-br from-amber-950/60 to-orange-950/40 border-amber-500/40' 
+              : studyState.phase === 'paused'
+              ? 'bg-gradient-to-br from-slate-900 to-slate-950 border-slate-600/40'
+              : 'bg-gradient-to-br from-slate-900 to-slate-950 border-slate-700/40'
+          }`}>
+            <div className="text-center">
+              <div className="text-[10px] uppercase tracking-widest text-slate-400 mb-1">
+                {studyState.phase === 'working' && `${preset.icon} ODAKLAN`}
+                {studyState.phase === 'break' && '☕ MOLA'}
+                {studyState.phase === 'paused' && '⏸ DURAKLATILDI'}
+                {studyState.phase === 'idle' && `${preset.icon} ${preset.name.toUpperCase()} HAZIR`}
+              </div>
+              <div className="text-6xl font-bold font-mono text-white my-2 leading-none tabular-nums">
+                {studyState.phase === 'idle' 
+                  ? formatMMSS(preset.workMin * 60)
+                  : preset.id === 'flexible' && studyState.phase === 'working'
+                  ? formatMMSS(phaseElapsed)
+                  : formatMMSS(phaseRemaining)}
+              </div>
+              <div className="text-xs text-slate-400">
+                {studyState.phase === 'working' && preset.id !== 'flexible' && `${formatMMSS(phaseElapsed)} çalışıldı`}
+                {studyState.phase === 'working' && preset.id === 'flexible' && 'Ne kadar istersen'}
+                {studyState.phase === 'break' && 'Molada dinlen, su iç'}
+                {studyState.phase === 'paused' && 'Devam etmek için play tuşuna bas'}
+                {studyState.phase === 'idle' && `${todayBlocksLabel} · ${preset.workMin}/${preset.breakMin} dk döngü`}
+              </div>
+            </div>
+
+            {/* Progress bar */}
+            {isRunning && preset.id !== 'flexible' && (
+              <div className="mt-4 h-1.5 bg-slate-900/60 rounded-full overflow-hidden">
+                <div 
+                  className={`h-full transition-all ${studyState.phase === 'working' ? 'bg-emerald-500' : 'bg-amber-500'}`}
+                  style={{ width: `${phaseTarget > 0 ? (phaseElapsed / phaseTarget) * 100 : 0}%` }}
+                />
+              </div>
+            )}
+
+            {/* Controls */}
+            <div className="flex items-center justify-center gap-2 mt-5">
+              {studyState.phase === 'idle' && (
+                <button
+                  onClick={startStudyWork}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-8 py-3 rounded-xl text-sm shadow-lg shadow-emerald-900/40 transition-all"
+                >▶ Başlat</button>
+              )}
+              {studyState.phase === 'working' && (
+                <>
+                  <button
+                    onClick={pauseStudy}
+                    className="bg-slate-700 hover:bg-slate-600 text-white font-bold px-5 py-2.5 rounded-xl text-xs transition-colors"
+                  >⏸ Duraklat</button>
+                  <button
+                    onClick={() => startStudyBreak(false)}
+                    className="bg-amber-600 hover:bg-amber-500 text-white font-bold px-5 py-2.5 rounded-xl text-xs transition-colors"
+                  >☕ Mola Al</button>
+                  <button
+                    onClick={stopStudy}
+                    className="bg-rose-700 hover:bg-rose-600 text-white font-bold px-4 py-2.5 rounded-xl text-xs transition-colors"
+                  >⏹</button>
+                </>
+              )}
+              {studyState.phase === 'break' && (
+                <>
+                  <button
+                    onClick={resumeStudyWork}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-6 py-2.5 rounded-xl text-xs transition-colors"
+                  >▶ Çalışmaya Dön</button>
+                  <button
+                    onClick={stopStudy}
+                    className="bg-slate-700 hover:bg-slate-600 text-white font-bold px-4 py-2.5 rounded-xl text-xs transition-colors"
+                  >⏹ Bitir</button>
+                </>
+              )}
+              {studyState.phase === 'paused' && (
+                <>
+                  <button
+                    onClick={startStudyWork}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-6 py-2.5 rounded-xl text-xs"
+                  >▶ Devam</button>
+                  <button
+                    onClick={stopStudy}
+                    className="bg-slate-700 hover:bg-slate-600 text-white font-bold px-4 py-2.5 rounded-xl text-xs"
+                  >⏹ Bitir</button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Bugünkü hedef */}
+          <div className="bg-slate-800/40 border border-slate-700/30 rounded-2xl p-4">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-bold text-slate-200">🎯 Bugünkü Hedef</h3>
+              <span className={`text-xs font-bold ${goalProgress >= 100 ? 'text-emerald-400' : 'text-blue-400'}`}>
+                {formatHMS(liveTotal)} / {Math.floor(studyGoalMinutes/60)}s {studyGoalMinutes%60}dk
+              </span>
+            </div>
+            <div className="h-3 bg-slate-900/60 rounded-full overflow-hidden">
+              <div 
+                className={`h-full transition-all ${
+                  goalProgress >= 100 ? 'bg-emerald-500' : 
+                  goalProgress >= 75 ? 'bg-blue-500' : 
+                  goalProgress >= 40 ? 'bg-amber-500' : 'bg-rose-500'
+                }`}
+                style={{ width: `${goalProgress}%` }}
+              />
+            </div>
+            <div className="flex items-center justify-between mt-1.5 text-[10px] text-slate-500">
+              <span>%{Math.round(goalProgress)} tamamlandı</span>
+              <span>
+                {studyCustomGoal > 0 
+                  ? 'Manuel hedef' 
+                  : examDate ? `Sınava göre adaptif (${Math.max(0, Math.ceil((new Date(examDate).getTime() - Date.now()) / 86400000))}g)` : 'Varsayılan'}
+              </span>
+            </div>
+          </div>
+
+          {/* Mod seçimi */}
+          {studyState.phase === 'idle' && (
+            <div className="bg-slate-800/40 border border-slate-700/30 rounded-2xl p-4">
+              <h3 className="text-sm font-bold text-slate-200 mb-3">⚙️ Çalışma Modu</h3>
+              <div className="grid grid-cols-2 gap-2">
+                {STUDY_PRESETS.map(p => (
+                  <button
+                    key={p.id}
+                    onClick={() => setStudyState(s => ({ ...s, mode: p.id }))}
+                    className={`text-left rounded-xl p-3 border transition-all ${
+                      studyState.mode === p.id
+                        ? 'bg-blue-600/20 border-blue-500/40 ring-1 ring-blue-500/40'
+                        : 'bg-slate-900/40 border-slate-700/30 hover:border-slate-600/50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 mb-1">
+                      <span className="text-lg">{p.icon}</span>
+                      <span className="text-xs font-bold text-white">{p.name}</span>
+                    </div>
+                    <div className="text-[10px] text-slate-400 mb-1">
+                      {p.id === 'flexible' ? 'Sınırsız süre' : `${p.workMin}/${p.breakMin} dk`}
+                    </div>
+                    <div className="text-[9px] text-slate-500 leading-tight">{p.description}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Son 7 gün grafik */}
+          <div className="bg-slate-800/40 border border-slate-700/30 rounded-2xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-bold text-slate-200">📈 Son 7 Gün</h3>
+              <div className="text-right">
+                <div className="text-[10px] text-slate-500">Haftalık ort.</div>
+                <div className="text-xs font-bold text-blue-400">{formatHMS(weekAvg)}/gün</div>
+              </div>
+            </div>
+            <div className="flex items-end justify-between gap-1.5 h-24">
+              {last7.map((d, i) => {
+                const hitGoal = d.totalSeconds >= goalSec;
+                const heightPct = maxDaySec > 0 ? (d.totalSeconds / maxDaySec) * 100 : 0;
+                const isToday = i === 6;
+                return (
+                  <div key={d.date} className="flex-1 flex flex-col items-center gap-1">
+                    <div className="flex-1 w-full flex flex-col justify-end">
+                      <div
+                        className={`w-full rounded-t-md transition-all ${
+                          hitGoal ? 'bg-emerald-500' :
+                          d.totalSeconds > goalSec * 0.5 ? 'bg-blue-500' :
+                          d.totalSeconds > 0 ? 'bg-amber-500' : 'bg-slate-700'
+                        } ${isToday ? 'ring-2 ring-white/20' : ''}`}
+                        style={{ height: `${Math.max(2, heightPct)}%` }}
+                        title={`${d.dayLabel}: ${formatHMS(d.totalSeconds)}`}
+                      />
+                    </div>
+                    <div className={`text-[9px] ${isToday ? 'text-white font-bold' : 'text-slate-500'}`}>
+                      {d.dayLabel}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-2 flex items-center gap-3 text-[9px] text-slate-400">
+              <span className="flex items-center gap-1"><span className="w-2 h-2 bg-emerald-500 rounded-sm" /> Hedefe ulaştın</span>
+              <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-sm" /> &gt;%50</span>
+              <span className="flex items-center gap-1"><span className="w-2 h-2 bg-amber-500 rounded-sm" /> Eksik</span>
+            </div>
+          </div>
+
+          {/* Streak + istatistik */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-3 text-center">
+              <div className="text-2xl font-bold text-orange-400">🔥 {streak}</div>
+              <div className="text-[9px] text-slate-400">gün seri</div>
+            </div>
+            <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-3 text-center">
+              <div className="text-2xl font-bold text-blue-400">{studyState.completedWorkBlocks}</div>
+              <div className="text-[9px] text-slate-400">bugün blok</div>
+            </div>
+            <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-3 text-center">
+              <div className="text-2xl font-bold text-violet-400">{formatHMS(weekTotal)}</div>
+              <div className="text-[9px] text-slate-400">bu hafta</div>
+            </div>
+          </div>
+
+          {/* Manuel hedef */}
+          <div className="bg-slate-800/40 border border-slate-700/30 rounded-2xl p-4">
+            <h3 className="text-sm font-bold text-slate-200 mb-2">🎛 Günlük Hedefi Özelleştir</h3>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={0}
+                max={720}
+                value={studyCustomGoal || ''}
+                onChange={e => setStudyCustomGoal(Math.max(0, Math.min(720, parseInt(e.target.value) || 0)))}
+                placeholder="Dakika (boş = adaptif)"
+                className="flex-1 bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600"
+              />
+              {studyCustomGoal > 0 && (
+                <button
+                  onClick={() => setStudyCustomGoal(0)}
+                  className="text-xs text-slate-400 hover:text-rose-400 px-2"
+                >Temizle</button>
+              )}
+            </div>
+            <div className="text-[10px] text-slate-500 mt-1">
+              {studyCustomGoal > 0 
+                ? `Manuel: ${Math.floor(studyCustomGoal/60)}s ${studyCustomGoal%60}dk`
+                : `Adaptif — sınav yaklaştıkça hedef otomatik artar (şu an ${Math.floor(studyGoalMinutes/60)}s ${studyGoalMinutes%60}dk)`}
+            </div>
+          </div>
+
+          {/* Bildirim ayarları */}
+          <div className="bg-slate-800/40 border border-slate-700/30 rounded-2xl p-4">
+            <h3 className="text-sm font-bold text-slate-200 mb-2">🔔 Bildirimler</h3>
+            <label className="flex items-center justify-between py-1.5 cursor-pointer">
+              <div>
+                <div className="text-xs text-white">🌐 Tarayıcı bildirimi</div>
+                <div className="text-[10px] text-slate-500">Mola başlar/biter uyarısı</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={studyBrowserNotifOn}
+                onChange={e => setStudyBrowserNotifOn(e.target.checked)}
+                className="w-4 h-4"
+              />
+            </label>
+            <label className="flex items-center justify-between py-1.5 cursor-pointer">
+              <div>
+                <div className="text-xs text-white">📱 Telegram bildirimi</div>
+                <div className="text-[10px] text-slate-500">Başla/bitir/mola mesajları</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={studyTelegramOn}
+                onChange={e => setStudyTelegramOn(e.target.checked)}
+                className="w-4 h-4"
+              />
+            </label>
+          </div>
+
+          {/* Bilimsel not */}
+          <div className="bg-gradient-to-br from-indigo-950/40 to-violet-950/30 border border-indigo-700/30 rounded-2xl p-4 text-xs text-indigo-200/80 leading-relaxed">
+            <div className="font-bold text-indigo-300 mb-1">💡 Bilimsel Not</div>
+            <p>Odaklanma süresi 20-90 dk arası sağlıklıdır. Sürekli &gt;8 saat çalışmak verimi düşürür (overlearning). 
+               Ardışık günlerde çalışmamak &gt; 2 gün → öğrenilen bilgilerin %40'ı 7 gün içinde unutulur (Ebbinghaus).</p>
+          </div>
+
+          <div className="h-4" />
+        </div>
+      </div>
+    );
+  };
+
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 📊 ANALİZ — Zayıf Konu + Hata Günlüğü + Sınav Geri Sayımı
+  // ═══════════════════════════════════════════════════════════════════════
+  const renderAnaliz = () => {
+    const days = daysToExam();
+    const intensity = examIntensity();
+    const intensityColor = {
+      'normal': 'text-emerald-400 bg-emerald-900/20 border-emerald-700/30',
+      'orta': 'text-blue-400 bg-blue-900/20 border-blue-700/30',
+      'yogun': 'text-amber-400 bg-amber-900/20 border-amber-700/30',
+      'kritik': 'text-rose-400 bg-rose-900/20 border-rose-700/30',
+    }[intensity];
+    const intensityLabel = {
+      'normal': '📚 Normal Tempo',
+      'orta': '⚡ Orta Tempo',
+      'yogun': '🔥 Yoğun Tempo',
+      'kritik': '🚨 Kritik Dönem',
+    }[intensity];
+
+    return (
+      <div className="min-h-[100dvh] bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex flex-col animate-in fade-in duration-300">
+        {/* Header */}
+        <div className="sticky top-0 z-10 bg-slate-950/90 backdrop-blur-xl border-b border-slate-800 px-3 py-2.5 flex items-center justify-between">
+          <button
+            onClick={() => setMode('setup')}
+            className="text-slate-400 hover:text-white p-1.5 rounded-lg bg-slate-800/60"
+          ><Home size={16} /></button>
+          <h1 className="text-base font-bold text-white flex items-center gap-1.5">📊 Analiz & Hatalarım</h1>
+          <div className="w-7" />
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-3 space-y-3">
+          {/* SINAV GERİ SAYIMI */}
+          <div className={`rounded-2xl p-4 border ${intensityColor}`}>
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider opacity-70 mb-0.5">KPSS Önlisans Sınavı</div>
+                {days !== null ? (
+                  <>
+                    <div className="text-3xl font-bold leading-none">
+                      {days === 0 ? 'BUGÜN!' : `${days} gün`}
+                    </div>
+                    <div className="text-xs opacity-80 mt-1">{intensityLabel}</div>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-sm font-bold">Tarih belirlenmemiş</div>
+                    <div className="text-[11px] opacity-80 mt-0.5">Sistem akıllı tekrar için tarihi bilmesi gerek</div>
+                  </>
+                )}
+              </div>
+              <input
+                type="date"
+                value={examDate}
+                onChange={e => persistExamDate(e.target.value)}
+                className="bg-slate-900/60 border border-slate-700/50 rounded-lg px-2 py-1 text-xs text-white"
+              />
+            </div>
+            {days !== null && days > 0 && (
+              <div className="text-[11px] opacity-90 leading-relaxed">
+                {intensity === 'kritik' && '⚠️ Yeni soru ekleme azaltıldı, tüm hataların her oturumda tekrar gelir. Eski tekrarları pekiştirme zamanı.'}
+                {intensity === 'yogun' && '💪 Hatalı soruların %50\'si bonus tekrar olarak eklendi. Yeni soru sayısı düşürüldü.'}
+                {intensity === 'orta' && '📖 Hatalı soruların %30\'u bonus tekrar olarak eklendi. Tempoyu artırma vakti.'}
+                {intensity === 'normal' && '🎯 Standart SM-2 algoritması aktif. Yeni soru ekleyerek tabanı genişletme zamanı.'}
+              </div>
+            )}
+          </div>
+
+          {/* GENEL DURUM */}
+          <div className="grid grid-cols-4 gap-2">
+            <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-3 text-center">
+              <div className="text-2xl font-bold text-cyan-400">{analyzeStats.totalQuestions}</div>
+              <div className="text-[9px] text-slate-400">Toplam Soru</div>
+            </div>
+            <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-3 text-center">
+              <div className="text-2xl font-bold text-blue-400">{analyzeStats.reviewedQuestions}</div>
+              <div className="text-[9px] text-slate-400">Çalışıldı</div>
+            </div>
+            <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-3 text-center">
+              <div className="text-2xl font-bold text-violet-400">{analyzeStats.masteredCount}</div>
+              <div className="text-[9px] text-slate-400">🏆 Kalıcı</div>
+            </div>
+            <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-3 text-center">
+              <div className="text-2xl font-bold text-rose-400">{analyzeStats.errorBook.length}</div>
+              <div className="text-[9px] text-slate-400">📕 Hatalı</div>
+            </div>
+          </div>
+
+          {/* DERS BAZLI BAŞARI */}
+          {Object.keys(analyzeStats.bySubject).length > 0 && (
+            <div className="bg-slate-800/40 border border-slate-700/30 rounded-2xl p-4">
+              <h3 className="text-sm font-bold text-slate-200 mb-3">📖 Ders Bazlı Performans</h3>
+              <div className="space-y-2">
+                {Object.entries(analyzeStats.bySubject)
+                  .sort((a, b) => b[1].total - a[1].total)
+                  .map(([subj, s]) => {
+                    const masteredPct = s.total > 0 ? (s.mastered / s.total) * 100 : 0;
+                    const errorPct = s.total > 0 ? (s.wrong / s.total) * 100 : 0;
+                    return (
+                      <div key={subj}>
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <span className="text-white font-medium">{subj}</span>
+                          <span className="text-slate-400">{s.total} soru</span>
+                        </div>
+                        <div className="h-2 bg-slate-900/60 rounded-full overflow-hidden flex">
+                          <div className="bg-emerald-500" style={{ width: `${masteredPct}%` }} title="Kalıcı" />
+                          <div className="bg-rose-500" style={{ width: `${errorPct}%` }} title="Hatalı" />
+                        </div>
+                        <div className="flex items-center justify-between text-[10px] text-slate-500 mt-0.5">
+                          <span>🏆 {s.mastered} kalıcı</span>
+                          <span>📕 {s.wrong} hatalı</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+          )}
+
+          {/* EN ZAYIF KONULAR */}
+          {analyzeStats.weakest.length > 0 && (
+            <div className="bg-rose-950/20 border border-rose-700/30 rounded-2xl p-4">
+              <h3 className="text-sm font-bold text-rose-300 mb-2 flex items-center gap-1.5">
+                ⚠️ En Zayıf Konuların
+                <span className="text-[10px] text-slate-500 font-normal">(en çok yanlış bildiklerin)</span>
+              </h3>
+              <div className="space-y-1.5">
+                {analyzeStats.weakest.slice(0, 5).map((t, i) => (
+                  <button
+                    key={`${t.subject}-${t.topic}`}
+                    onClick={() => {
+                      setUstasiFilterSubject(t.subject);
+                      setMode('setup');
+                      setTimeout(() => alert(`Önce ⚡ KPSS Ustası'na git → ${t.subject} dersi seçildi → Başla`), 100);
+                    }}
+                    className="w-full flex items-center justify-between bg-rose-900/20 hover:bg-rose-900/30 border border-rose-700/20 rounded-xl px-3 py-2 transition-colors text-left"
+                  >
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <span className="text-rose-400 font-bold text-sm">{i + 1}.</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm text-white truncate">{t.topic}</div>
+                        <div className="text-[10px] text-rose-300/70">{t.subject} • {t.total} soru</div>
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-lg font-bold text-rose-400">%{Math.round(t.errorRate * 100)}</div>
+                      <div className="text-[9px] text-slate-500">hata oranı</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* HATA GÜNLÜĞÜ */}
+          {analyzeStats.errorBook.length > 0 && (
+            <div className="bg-amber-950/20 border border-amber-700/30 rounded-2xl p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-bold text-amber-300 flex items-center gap-1.5">
+                  📕 Hatalarım Günlüğü
+                  <span className="text-[10px] text-slate-500 font-normal">({analyzeStats.errorBook.length} soru)</span>
+                </h3>
+                <button
+                  onClick={() => {
+                    // Sadece hatalı soruları queue'ya at
+                    const errorQ = analyzeStats.errorBook;
+                    if (errorQ.length === 0) { alert('Hatalı soru yok!'); return; }
+                    setUstasiQueue([...errorQ].sort(() => Math.random() - 0.5));
+                    setUstasiIndex(0);
+                    setUstasiSelectedAnswer(null);
+                    setUstasiShowResult(false);
+                    setUstasiSessionStats({ correct: 0, wrong: 0, xpGained: 0, startTime: Date.now(), relapseQueue: [] });
+                    setMode('ustasi');
+                  }}
+                  className="text-xs bg-amber-600 hover:bg-amber-500 text-white font-bold px-3 py-1.5 rounded-lg transition-colors"
+                >Hepsini Tekrar Et</button>
+              </div>
+              <div className="space-y-2 max-h-72 overflow-y-auto overscroll-contain">
+                {analyzeStats.errorBook.slice(0, 20).map((q) => {
+                  const lapses = q.srsLapses || 0;
+                  const lastDate = q.srsLastReviewedAt ? new Date(q.srsLastReviewedAt).toLocaleDateString('tr') : 'Hiç';
+                  return (
+                    <div
+                      key={q.id}
+                      className="bg-amber-900/10 border border-amber-700/20 rounded-xl p-2 flex gap-2 items-center"
+                    >
+                      <img src={q.image} alt="Soru" className="w-14 h-14 rounded-lg object-cover bg-white shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[11px] text-white truncate">{q.subject}{q.topic ? ` / ${q.topic}` : ''}</div>
+                        <div className="text-[9px] text-amber-300/70 mt-0.5">
+                          ❌ {lapses} kez yanlış • Son: {lastDate}
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0 px-1">
+                        <div className="text-[11px] font-bold text-amber-400">{getStageEmoji(q.srsStage)}</div>
+                        <div className="text-[9px] text-slate-500">{getStageLabel(q.srsStage)}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+                {analyzeStats.errorBook.length > 20 && (
+                  <div className="text-center text-[10px] text-slate-500 pt-1">
+                    +{analyzeStats.errorBook.length - 20} soru daha…
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* EN GÜÇLÜ KONULAR */}
+          {analyzeStats.strongest.length > 0 && (
+            <div className="bg-emerald-950/20 border border-emerald-700/30 rounded-2xl p-4">
+              <h3 className="text-sm font-bold text-emerald-300 mb-2 flex items-center gap-1.5">
+                💪 En Güçlü Konuların
+              </h3>
+              <div className="grid grid-cols-2 gap-1.5">
+                {analyzeStats.strongest.slice(0, 6).map(t => (
+                  <div
+                    key={`${t.subject}-${t.topic}`}
+                    className="bg-emerald-900/15 border border-emerald-700/20 rounded-lg px-2 py-1.5"
+                  >
+                    <div className="text-[11px] text-white truncate">{t.topic}</div>
+                    <div className="text-[9px] text-emerald-400">{t.subject} • %{Math.round((1 - t.errorRate) * 100)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* TELEGRAM HATIRLATMA AYARI */}
+          <div className="bg-blue-950/20 border border-blue-700/30 rounded-2xl p-4">
+            <h3 className="text-sm font-bold text-blue-300 mb-2 flex items-center gap-1.5">
+              🤖 Telegram Hatırlatmaları
+            </h3>
+            <p className="text-[11px] text-slate-300 leading-relaxed mb-2">
+              Telegram botun her sabah 08:00'da bekleyen soru sayını ve günlük performansını mesaj atacak.
+            </p>
+            <div className="text-[10px] text-slate-400 space-y-0.5">
+              <div>• <span className="text-emerald-400">100+ gün</span>: Günde 1 mesaj (sabah)</div>
+              <div>• <span className="text-blue-400">60-100 gün</span>: Günde 1 mesaj + akşam ek</div>
+              <div>• <span className="text-amber-400">30-60 gün</span>: Günde 2 mesaj (sabah + akşam)</div>
+              <div>• <span className="text-rose-400">&lt;30 gün</span>: Günde 3 mesaj (sabah + öğle + akşam)</div>
+            </div>
+            {days !== null && (
+              <div className="mt-2 text-[10px] text-blue-300 font-medium">
+                Şu anki tempo: {intensityLabel}
+              </div>
+            )}
+          </div>
+
+          <div className="h-4" />
+        </div>
+      </div>
+    );
+  };
+
+
+  // ═══════════════════════════════════════════════════════════════════════
   // ⚡ KPSS USTASI — Render
   // ═══════════════════════════════════════════════════════════════════════
   const renderUstasi = () => {
@@ -8254,6 +9397,8 @@ export default function App() {
       {(mode as string) === 'saved_notes' && renderSavedNotes()}
       {mode === 'memorize' && renderMemorize()}
       {mode === 'ustasi' && renderUstasi()}
+      {mode === 'analiz' && renderAnaliz()}
+      {mode === 'calisma' && renderCalisma()}
       {gameModeQuestions && renderGameMode()}
       {renderNoteModal()}
       {renderQuestionCropModal()}

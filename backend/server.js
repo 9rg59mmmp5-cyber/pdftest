@@ -279,14 +279,11 @@ app.get('/pdftest/api/storage-usage', requireAuth, (req, res) => {
     const uid = req.uid;
 
     // PDF dosyaları
-    const pdfRows = db.prepare("SELECT data FROM pdfs WHERE uid=?").all(uid);
+    const pdfRows = db.prepare("SELECT size FROM pdfs WHERE uid=?").all(uid);
     let pdfBytes = 0;
     let pdfCount = pdfRows.length;
     for (const r of pdfRows) {
-      try {
-        const d = JSON.parse(r.data);
-        pdfBytes += d.size || 0;
-      } catch {}
+      pdfBytes += r.size || 0;
     }
 
     // Soru resimleri (dosya boyutları)
@@ -380,6 +377,81 @@ app.get('/pdftest/api/storage-usage', requireAuth, (req, res) => {
       // Detaylar (session içindekiler)
       drawingCount, bookmarkCount, pdfMarkCount, readPageCount,
     });
+
+// ── Çalışma sayacı bildirimleri — Telegram'a ilet ─────────────────────
+app.post('/pdftest/api/study/notify', requireAuth, async (req, res) => {
+  try {
+    const { title, body } = req.body || {};
+    if (!title) return res.status(400).json({ error: 'title gerekli' });
+
+// ── Frontend hata kayıt — her client error burada loglanır ────────────
+app.post('/pdftest/api/client-error', async (req, res) => {
+  try {
+    const { message, stack, userAgent, url, mode, component } = req.body || {};
+    const ts = new Date().toISOString();
+    const logLine = JSON.stringify({
+      ts, message, stack, userAgent, url, mode, component,
+      ip: req.ip || req.headers['x-forwarded-for'] || 'unknown',
+    }) + '\n';
+    
+    try {
+      fs.appendFileSync('/var/log/pdftest/client-errors.log', logLine);
+    } catch (e) { console.error('Log write failed:', e); }
+    
+    // Telegram'a uyarı gönder (opsiyonel)
+    const TG_TOKEN = process.env.PDFTEST_TG_TOKEN;
+    const TG_CHAT_ID = process.env.PDFTEST_TG_CHAT_ID || '860174169';
+    if (TG_TOKEN && message) {
+      try {
+        const short = String(message).slice(0, 200);
+        const text = `🐛 *Frontend Hatası*\n\n\`${short}\`\n\nURL: ${url || '?'}\nMode: ${mode || '?'}`;
+        fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: TG_CHAT_ID, text, parse_mode: 'Markdown',
+            disable_notification: true,
+          }),
+        }).catch(()=>{});
+      } catch {}
+    }
+    
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('client-error endpoint:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+    
+    // Env'den token ve chat_id
+    const TG_TOKEN = process.env.PDFTEST_TG_TOKEN;
+    const TG_CHAT_ID = process.env.PDFTEST_TG_CHAT_ID || '860174169';
+    
+    if (!TG_TOKEN) {
+      // Token yoksa 200 dön ama içerik boş — frontend sessizce devam etsin
+      return res.json({ ok: false, reason: 'no_token' });
+    }
+    
+    const text = body ? `*${title}*\n${body}` : `*${title}*`;
+    const tgResp = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: TG_CHAT_ID,
+        text,
+        parse_mode: 'Markdown',
+        disable_notification: false,
+      }),
+    });
+    const j = await tgResp.json();
+    res.json({ ok: j.ok === true });
+  } catch (e) {
+    console.error('study notify error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
   } catch (e) {
     console.error('storage-usage error:', e);
     res.status(500).json({ error: String(e) });

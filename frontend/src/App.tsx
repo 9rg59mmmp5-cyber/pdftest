@@ -809,6 +809,277 @@ export default function App() {
     }
   }, [studyBrowserNotifOn]);
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // 🌐 SUNUCU SENKRONİZASYONU — Anlık kayıt + offline queue + crash recovery
+  // ═══════════════════════════════════════════════════════════════════════
+  const studyEventQueueRef = useRef<any[]>([]);
+  const studyInitialRestoreDone = useRef(false);
+
+  // Offline queue'yu localforage'dan yükle
+  useEffect(() => {
+    (async () => {
+      try {
+        const q = await localforage.getItem<any[]>('study_event_queue');
+        if (Array.isArray(q) && q.length > 0) {
+          studyEventQueueRef.current = q;
+        }
+      } catch {}
+    })();
+  }, []);
+
+  // Queue'yu diske yaz (hızlı, senkron hissi versin diye debounced değil)
+  const persistStudyQueue = async () => {
+    try {
+      await localforage.setItem('study_event_queue', studyEventQueueRef.current);
+    } catch {}
+  };
+
+  // Event'i queue'ya ekle + sunucuya göndermeyi dene
+  const queueStudyEvent = (type: string, extra: Partial<any> = {}) => {
+    const s = studyStateRef.current;
+    const event = {
+      event_id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      type,
+      ts: Date.now(),
+      date: s.todayDate,
+      mode: s.mode,
+      phase: s.phase,
+      elapsed_in_phase: s.phase === 'working' || s.phase === 'break'
+        ? Math.floor((Date.now() - s.phaseStartedAt) / 1000)
+        : s.accumulatedInPhase,
+      today_total_seconds: s.todayTotalSeconds,
+      completed_blocks: s.completedWorkBlocks,
+      ...extra,
+    };
+    studyEventQueueRef.current.push(event);
+    persistStudyQueue();
+    // Hemen gönder
+    flushStudyQueue();
+  };
+
+  // Queue'yu sunucuya flush et
+  const flushStudyQueue = async () => {
+    if (studyEventQueueRef.current.length === 0) return;
+    if (!user) return;
+    try {
+      const token = await user.getIdToken();
+      const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+      const toSend = [...studyEventQueueRef.current];
+      const r = await fetch(`${BASE}/study/event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ events: toSend }),
+      });
+      if (r.ok) {
+        // Başarıyla gönderildi → queue'dan çıkar
+        studyEventQueueRef.current = studyEventQueueRef.current.filter(
+          e => !toSend.find(s => s.event_id === e.event_id)
+        );
+        persistStudyQueue();
+      }
+    } catch {
+      // Offline veya hata → queue'da kalsın
+    }
+  };
+
+  // Anlık state'i sunucuya yaz (heartbeat/snapshot)
+  const syncStudyStateToServer = async () => {
+    if (!user) return;
+    const s = studyStateRef.current;
+    // Aktif çalışma varsa güncel total hesapla
+    let currentTotal = s.todayTotalSeconds;
+    if (s.phase === 'working') {
+      const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
+      currentTotal = s.todayTotalSeconds + Math.max(0, elapsed - s.accumulatedInPhase);
+    }
+    try {
+      const token = await user.getIdToken();
+      const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+      await fetch(`${BASE}/study/state`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          phase: s.phase,
+          mode: s.mode,
+          phase_started_at: s.phaseStartedAt,
+          accumulated_in_phase: s.accumulatedInPhase,
+          completed_blocks: s.completedWorkBlocks,
+          today_total_seconds: currentTotal,
+          today_date: s.todayDate,
+        }),
+      });
+    } catch {}
+  };
+
+  // Sunucudan state'i restore et (sayfa açılışı)
+  const restoreFromServer = async () => {
+    if (!user || studyInitialRestoreDone.current) return;
+    studyInitialRestoreDone.current = true;
+    try {
+      const token = await user.getIdToken();
+      const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+      const r = await fetch(`${BASE}/study/state`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!r.ok) return;
+      const { state: serverState } = await r.json();
+      if (!serverState) return;
+
+      // Sunucu ve local arasında en güncel olanı tercih et
+      const currentLocal = studyStateRef.current;
+      // Eğer sunucuda bir şey varsa ve local henüz idle ise sunucuyu kabul et
+      // (Ya da aynı gün ise ve local total=0 ise)
+      const sameDay = serverState.today_date === currentLocal.todayDate;
+      if (sameDay && serverState.today_total_seconds > currentLocal.todayTotalSeconds) {
+        setStudyState(s => ({
+          ...s,
+          phase: serverState.phase || s.phase,
+          mode: serverState.mode || s.mode,
+          phaseStartedAt: serverState.phase_started_at || 0,
+          accumulatedInPhase: serverState.accumulated_in_phase || 0,
+          completedWorkBlocks: serverState.completed_blocks || 0,
+          todayTotalSeconds: serverState.today_total_seconds || 0,
+          todayDate: serverState.today_date || s.todayDate,
+        }));
+      }
+
+      // Günlük geçmişi de çek
+      const histR = await fetch(`${BASE}/study/daily?days=30`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (histR.ok) {
+        const { daily } = await histR.json();
+        if (Array.isArray(daily)) {
+          setStudyHistory(daily.map((d: any) => ({
+            date: d.date,
+            totalSeconds: d.total_seconds,
+            workBlocks: d.completed_blocks,
+            breaks: 0,
+            mode: d.mode,
+            timeline: [],
+          })));
+        }
+      }
+
+      // Settings (custom goal, notif toggles)
+      const settingsR = await fetch(`${BASE}/study/settings`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (settingsR.ok) {
+        const { settings } = await settingsR.json();
+        if (settings) {
+          if (typeof settings.customGoal === 'number') setStudyCustomGoal(settings.customGoal);
+          if (typeof settings.telegramOn === 'boolean') setStudyTelegramOn(settings.telegramOn);
+          if (typeof settings.browserNotifOn === 'boolean') setStudyBrowserNotifOn(settings.browserNotifOn);
+        }
+      }
+    } catch {}
+  };
+
+  // user geldiğinde restore et
+  useEffect(() => {
+    if (user && !studyInitialRestoreDone.current) {
+      restoreFromServer();
+    }
+  }, [user]);
+
+  // 30 sn'de bir heartbeat — aktif çalışma varsa
+  useEffect(() => {
+    const hb = setInterval(() => {
+      const s = studyStateRef.current;
+      if (s.phase === 'working' || s.phase === 'break') {
+        syncStudyStateToServer();
+        queueStudyEvent('heartbeat');
+      }
+    }, 30000); // 30 sn
+    return () => clearInterval(hb);
+  }, [user]);
+
+  // Queue flush retry — 60 sn'de bir hata durumunda gönderim dener
+  useEffect(() => {
+    const retry = setInterval(() => {
+      if (studyEventQueueRef.current.length > 0) flushStudyQueue();
+    }, 60000);
+    return () => clearInterval(retry);
+  }, [user]);
+
+  // Sayfa kapatılırken sendBeacon ile son state
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      const s = studyStateRef.current;
+      if (!user) return;
+      if (s.phase !== 'working' && s.phase !== 'break' && s.phase !== 'paused') return;
+
+      let currentTotal = s.todayTotalSeconds;
+      if (s.phase === 'working') {
+        const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
+        currentTotal = s.todayTotalSeconds + Math.max(0, elapsed - s.accumulatedInPhase);
+      }
+      const body = new Blob([JSON.stringify({
+        phase: s.phase, mode: s.mode,
+        phase_started_at: s.phaseStartedAt,
+        accumulated_in_phase: s.accumulatedInPhase,
+        completed_blocks: s.completedWorkBlocks,
+        today_total_seconds: currentTotal,
+        today_date: s.todayDate,
+      })], { type: 'application/json' });
+      // sendBeacon auth gerektiriyor ama tarayıcı kapanışında header eklenemeyebilir
+      // Bunun için özel bir beacon endpoint'i de yapabilirdik, şimdilik direkt yollayalım
+      try {
+        user.getIdToken().then((token: string) => {
+          const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+          // Beacon token'ı URL'e koyalım (alternatif: cookie auth)
+          navigator.sendBeacon(`${BASE}/study/state?beacon_token=${encodeURIComponent(token)}`, body);
+        });
+      } catch {}
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    window.addEventListener('pagehide', onBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('pagehide', onBeforeUnload);
+    };
+  }, [user]);
+
+  // Page visibility değişince — arka plana gidince anında kaydet
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        syncStudyStateToServer();
+      } else if (document.visibilityState === 'visible') {
+        // Geri geldik — son state'i sunucudan çek (başka cihazda güncellenmiş olabilir)
+        // Ama sadece aktif çalışmıyorsak, aktifse kendi hesabımıza güveniyoruz
+        const s = studyStateRef.current;
+        if (s.phase === 'idle') {
+          restoreFromServer();
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, [user]);
+
+  // Ayarları sunucuya sync (custom goal + notif toggles)
+  useEffect(() => {
+    if (!user) return;
+    const timer = setTimeout(async () => {
+      try {
+        const token = await user.getIdToken();
+        const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+        await fetch(`${BASE}/study/settings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            customGoal: studyCustomGoal,
+            telegramOn: studyTelegramOn,
+            browserNotifOn: studyBrowserNotifOn,
+          }),
+        });
+      } catch {}
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [studyCustomGoal, studyTelegramOn, studyBrowserNotifOn, user]);
+
   // Bildirim gönderici — browser + telegram
   const sendStudyNotif = (title: string, body: string) => {
     // Browser
@@ -841,12 +1112,16 @@ export default function App() {
       accumulatedInPhase: 0,
     }));
     sendStudyNotif(`${preset.icon} Çalışma Başladı`, `${preset.name}: ${preset.workMin} dk odak`);
+    // Event + sync (setState async olduğu için setTimeout ile ref güncel olsun)
+    setTimeout(() => {
+      queueStudyEvent('start');
+      syncStudyStateToServer();
+    }, 50);
   };
 
   // Mola başlat
   const startStudyBreak = (long: boolean = false) => {
     const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
-    // İş bloğu tamamlandı
     setStudyState(s => {
       const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
       const workedNow = Math.max(0, elapsed - s.accumulatedInPhase);
@@ -861,6 +1136,10 @@ export default function App() {
     });
     const min = long ? preset.longBreakMin : preset.breakMin;
     sendStudyNotif('☕ Mola zamanı', `${min} dk dinlen. Su iç, biraz yürü.`);
+    setTimeout(() => {
+      queueStudyEvent('break_start', { meta: { long } });
+      syncStudyStateToServer();
+    }, 50);
   };
 
   // Çalışmayı devam et (mola bitti)
@@ -873,6 +1152,10 @@ export default function App() {
       accumulatedInPhase: 0,
     }));
     sendStudyNotif(`${preset.icon} Devam`, `${preset.workMin} dk odaklanma başladı`);
+    setTimeout(() => {
+      queueStudyEvent('resume_after_break');
+      syncStudyStateToServer();
+    }, 50);
   };
 
   // Pause (elle)
@@ -880,7 +1163,6 @@ export default function App() {
     setStudyState(s => {
       if (s.phase !== 'working' && s.phase !== 'break') return s;
       const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
-      // Working ise çalışma süresini total'e ekle
       const newTotal = s.phase === 'working' 
         ? s.todayTotalSeconds + Math.max(0, elapsed - s.accumulatedInPhase)
         : s.todayTotalSeconds;
@@ -891,24 +1173,29 @@ export default function App() {
         todayTotalSeconds: newTotal,
       };
     });
+    setTimeout(() => {
+      queueStudyEvent('pause');
+      syncStudyStateToServer();
+    }, 50);
   };
 
   // Duraklatılmış çalışmaya devam et — sayaç KALDIĞI YERDEN
   const resumeFromPause = () => {
     setStudyState(s => {
       if (s.phase !== 'paused') return s;
-      // phaseStartedAt'i öyle ayarla ki "Date.now() - phaseStartedAt" = accumulatedInPhase saniye
-      // Böylece sayaç kaldığı yerden devam eder
       const newStartedAt = Date.now() - (s.accumulatedInPhase * 1000);
       return {
         ...s,
         phase: 'working',
         phaseStartedAt: newStartedAt,
-        // accumulatedInPhase'i koruyoruz ki todayTotalSeconds hesabında çift sayım olmasın
       };
     });
     const preset = STUDY_PRESETS.find(p => p.id === studyStateRef.current.mode)!;
     sendStudyNotif(`${preset.icon} Devam`, 'Sayaç kaldığı yerden devam ediyor');
+    setTimeout(() => {
+      queueStudyEvent('resume_from_pause');
+      syncStudyStateToServer();
+    }, 50);
   };
 
   // Tamamen bitir — bugünkü oturumu kapat
@@ -927,6 +1214,10 @@ export default function App() {
       return { ...s, phase: 'idle', phaseStartedAt: 0, accumulatedInPhase: 0 };
     });
     sendStudyNotif('⏹ Çalışma Durdu', 'Bugünlük güzel iş, yarın görüşürüz!');
+    setTimeout(() => {
+      queueStudyEvent('stop');
+      syncStudyStateToServer();
+    }, 50);
   };
 
   // Otomatik phase geçişi — work bitti mi? break bitti mi?
@@ -7547,30 +7838,55 @@ export default function App() {
             </div>
           </div>
 
-          {/* Manuel hedef */}
+          {/* Manuel hedef + hızlı seçim */}
           <div className="bg-slate-800/40 border border-slate-700/30 rounded-2xl p-4">
-            <h3 className="text-sm font-bold text-slate-200 mb-2">🎛 Günlük Hedefi Özelleştir</h3>
-            <div className="flex items-center gap-2">
+            <h3 className="text-sm font-bold text-slate-200 mb-2">🎛 Günlük Hedef</h3>
+            <div className="grid grid-cols-6 gap-1.5 mb-2">
+              {[0, 180, 240, 300, 360, 420, 480].filter(x => x !== 420).map(minutes => {
+                const isAdaptive = minutes === 0;
+                const isActive = isAdaptive ? studyCustomGoal === 0 : studyCustomGoal === minutes;
+                const label = isAdaptive ? 'Oto' : `${minutes/60}s`;
+                return (
+                  <button
+                    key={minutes}
+                    onClick={() => setStudyCustomGoal(minutes)}
+                    className={`rounded-lg py-1.5 text-xs font-bold transition-all border ${
+                      isActive
+                        ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-900/40'
+                        : 'bg-slate-900/40 text-slate-300 border-slate-700/30 hover:border-slate-600'
+                    }`}
+                  >{label}</button>
+                );
+              })}
+            </div>
+            <div className="grid grid-cols-3 gap-1.5">
+              {[420, 540, 600].map(minutes => (
+                <button
+                  key={minutes}
+                  onClick={() => setStudyCustomGoal(minutes)}
+                  className={`rounded-lg py-1.5 text-xs font-bold transition-all border ${
+                    studyCustomGoal === minutes
+                      ? 'bg-rose-600 text-white border-rose-500'
+                      : 'bg-slate-900/40 text-slate-300 border-slate-700/30 hover:border-slate-600'
+                  }`}
+                >{minutes/60} saat{minutes >= 480 ? ' ⚠' : ''}</button>
+              ))}
+            </div>
+            <div className="mt-2 flex items-center gap-2">
               <input
                 type="number"
                 min={0}
                 max={720}
                 value={studyCustomGoal || ''}
                 onChange={e => setStudyCustomGoal(Math.max(0, Math.min(720, parseInt(e.target.value) || 0)))}
-                placeholder="Dakika (boş = adaptif)"
-                className="flex-1 bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600"
+                placeholder="Özel (dakika)"
+                className="flex-1 bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600"
               />
-              {studyCustomGoal > 0 && (
-                <button
-                  onClick={() => setStudyCustomGoal(0)}
-                  className="text-xs text-slate-400 hover:text-rose-400 px-2"
-                >Temizle</button>
-              )}
             </div>
-            <div className="text-[10px] text-slate-500 mt-1">
+            <div className="text-[10px] text-slate-500 mt-1.5">
               {studyCustomGoal > 0 
-                ? `Manuel: ${Math.floor(studyCustomGoal/60)}s ${studyCustomGoal%60}dk`
-                : `Adaptif — sınav yaklaştıkça hedef otomatik artar (şu an ${Math.floor(studyGoalMinutes/60)}s ${studyGoalMinutes%60}dk)`}
+                ? `Manuel hedef: ${Math.floor(studyCustomGoal/60)}s ${studyCustomGoal%60}dk ${studyCustomGoal >= 480 ? '(⚠️ 8+ saat: verim düşer)' : ''}`
+                : `Otomatik — sınava göre ${Math.floor(studyGoalMinutes/60)}s ${studyGoalMinutes%60}dk`}
             </div>
           </div>
 

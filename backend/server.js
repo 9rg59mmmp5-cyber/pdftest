@@ -383,222 +383,6 @@ app.post('/pdftest/api/study/notify', requireAuth, async (req, res) => {
   try {
     const { title, body } = req.body || {};
     if (!title) return res.status(400).json({ error: 'title gerekli' });
-
-// ═══════════════════════════════════════════════════════════════════════
-// ⏱ ÇALIŞMA SAYACI — Events, Daily, State
-// ═══════════════════════════════════════════════════════════════════════
-
-// DB: study_events, study_daily, study_state tabloları install script ile oluşturulur
-
-// Günlük özet güncelleme yardımcısı
-function updateStudyDaily(uid, date, deltaSeconds, blocks, mode) {
-  const now = Date.now();
-  const existing = db.prepare('SELECT * FROM study_daily WHERE uid=? AND date=?').get(uid, date);
-  if (existing) {
-    db.prepare(
-      'UPDATE study_daily SET total_seconds = MAX(total_seconds, ?), completed_blocks = MAX(completed_blocks, ?), last_ts = ?, mode = COALESCE(?, mode) WHERE uid=? AND date=?'
-    ).run(deltaSeconds, blocks, now, mode, uid, date);
-  } else {
-    db.prepare(
-      'INSERT INTO study_daily (uid, date, total_seconds, completed_blocks, mode, first_ts, last_ts) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(uid, date, deltaSeconds, blocks, mode, now, now);
-  }
-}
-
-// Event kaydet (start/pause/resume/break/stop/heartbeat)
-app.post('/pdftest/api/study/event', requireAuth, (req, res) => {
-  try {
-    const uid = req.uid;
-    const body = req.body || {};
-    const events = Array.isArray(body.events) ? body.events : [body];
-
-    const insert = db.prepare(
-      'INSERT OR IGNORE INTO study_events (uid, event_id, type, ts, date, mode, phase, elapsed_in_phase, today_total_seconds, completed_blocks, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    );
-
-    const trx = db.transaction((evs) => {
-      for (const e of evs) {
-        if (!e.event_id || !e.type || !e.ts || !e.date) continue;
-        insert.run(
-          uid,
-          String(e.event_id),
-          String(e.type),
-          Number(e.ts) || Date.now(),
-          String(e.date),
-          e.mode || null,
-          e.phase || null,
-          Number(e.elapsed_in_phase) || 0,
-          Number(e.today_total_seconds) || 0,
-          Number(e.completed_blocks) || 0,
-          e.meta ? JSON.stringify(e.meta) : null
-        );
-        // Daily özeti de güncelle
-        updateStudyDaily(uid, e.date, Number(e.today_total_seconds) || 0, Number(e.completed_blocks) || 0, e.mode);
-      }
-    });
-    trx(events);
-
-    res.json({ ok: true, accepted: events.length });
-  } catch (e) {
-    console.error('study/event error:', e);
-    res.status(500).json({ error: String(e) });
-  }
-});
-
-// Anlık state'i kaydet (crash recovery için)
-app.post('/pdftest/api/study/state', (req, res, next) => {
-  // Beacon (tarayıcı kapanışında) query param'dan token alabilir
-  const beaconToken = req.query.beacon_token;
-  if (beaconToken && !req.headers.authorization) {
-    req.headers.authorization = `Bearer ${beaconToken}`;
-  }
-  next();
-}, requireAuth, (req, res) => {
-  try {
-    const uid = req.uid;
-    const s = req.body || {};
-    db.prepare(
-      'INSERT OR REPLACE INTO study_state (uid, phase, mode, phase_started_at, accumulated_in_phase, completed_blocks, today_total_seconds, today_date, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(
-      uid,
-      s.phase || 'idle',
-      s.mode || 'deepwork',
-      Number(s.phase_started_at) || 0,
-      Number(s.accumulated_in_phase) || 0,
-      Number(s.completed_blocks) || 0,
-      Number(s.today_total_seconds) || 0,
-      s.today_date || '',
-      Date.now()
-    );
-
-    // Ayrıca daily özeti de güncelle
-    if (s.today_date && typeof s.today_total_seconds === 'number') {
-      updateStudyDaily(uid, s.today_date, Number(s.today_total_seconds), Number(s.completed_blocks) || 0, s.mode);
-    }
-
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('study/state POST error:', e);
-    res.status(500).json({ error: String(e) });
-  }
-});
-
-// Mevcut state'i oku (sayfa açılışında restore için)
-app.get('/pdftest/api/study/state', requireAuth, (req, res) => {
-  try {
-    const uid = req.uid;
-    const row = db.prepare('SELECT * FROM study_state WHERE uid=?').get(uid);
-    if (!row) return res.json({ state: null });
-    res.json({
-      state: {
-        phase: row.phase,
-        mode: row.mode,
-        phase_started_at: row.phase_started_at,
-        accumulated_in_phase: row.accumulated_in_phase,
-        completed_blocks: row.completed_blocks,
-        today_total_seconds: row.today_total_seconds,
-        today_date: row.today_date,
-        updated_at: row.updated_at,
-      },
-    });
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
-});
-
-// Günlük geçmişi oku (grafik için)
-app.get('/pdftest/api/study/daily', requireAuth, (req, res) => {
-  try {
-    const uid = req.uid;
-    const days = Math.min(365, Math.max(1, parseInt(req.query.days) || 30));
-    const rows = db.prepare(
-      'SELECT date, total_seconds, completed_blocks, mode FROM study_daily WHERE uid=? ORDER BY date DESC LIMIT ?'
-    ).all(uid, days);
-    res.json({ daily: rows });
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
-});
-
-// Günlük hedef + özel ayarlar (server-side saklı)
-app.get('/pdftest/api/study/settings', requireAuth, (req, res) => {
-  try {
-    const uid = req.uid;
-    const row = db.prepare("SELECT data FROM notes WHERE uid=? AND id='__study_settings__'").get(uid);
-    if (!row) return res.json({ settings: null });
-    try { res.json({ settings: JSON.parse(row.data) }); }
-    catch { res.json({ settings: null }); }
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
-});
-
-app.post('/pdftest/api/study/settings', requireAuth, (req, res) => {
-  try {
-    const uid = req.uid;
-    const data = JSON.stringify(req.body || {});
-    const now = Date.now();
-    db.prepare(
-      "INSERT OR REPLACE INTO notes (id, uid, data, date) VALUES ('__study_settings__', ?, ?, ?)"
-    ).run(uid, data, now);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
-});
-
-// Temizlik: 30 günden eski heartbeat event'leri sil (sadece daily özet kalsın)
-app.post('/pdftest/api/study/cleanup', requireAuth, (req, res) => {
-  try {
-    const uid = req.uid;
-    const cutoff = Date.now() - 30 * 86400000;
-    const r = db.prepare("DELETE FROM study_events WHERE uid=? AND type='heartbeat' AND ts < ?").run(uid, cutoff);
-    res.json({ ok: true, deleted: r.changes });
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
-});
-
-
-// ── Frontend hata kayıt — her client error burada loglanır ────────────
-app.post('/pdftest/api/client-error', async (req, res) => {
-  try {
-    const { message, stack, userAgent, url, mode, component } = req.body || {};
-    const ts = new Date().toISOString();
-    const logLine = JSON.stringify({
-      ts, message, stack, userAgent, url, mode, component,
-      ip: req.ip || req.headers['x-forwarded-for'] || 'unknown',
-    }) + '\n';
-    
-    try {
-      fs.appendFileSync('/var/log/pdftest/client-errors.log', logLine);
-    } catch (e) { console.error('Log write failed:', e); }
-    
-    // Telegram'a uyarı gönder (opsiyonel)
-    const TG_TOKEN = process.env.PDFTEST_TG_TOKEN;
-    const TG_CHAT_ID = process.env.PDFTEST_TG_CHAT_ID || '860174169';
-    if (TG_TOKEN && message) {
-      try {
-        const short = String(message).slice(0, 200);
-        const text = `🐛 *Frontend Hatası*\n\n\`${short}\`\n\nURL: ${url || '?'}\nMode: ${mode || '?'}`;
-        fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: TG_CHAT_ID, text, parse_mode: 'Markdown',
-            disable_notification: true,
-          }),
-        }).catch(()=>{});
-      } catch {}
-    }
-    
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('client-error endpoint:', e);
-    res.status(500).json({ error: String(e) });
-  }
-});
-
     
     // Env'den token ve chat_id
     const TG_TOKEN = process.env.PDFTEST_TG_TOKEN;
@@ -662,6 +446,142 @@ app.delete('/pdftest/api/tracking/:id', requireAuth, (req, res) => {
 });
 
 app.get('/pdftest/api/health', (_, res) => res.json({ status: 'ok', ts: Date.now() }));
+
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// ⏱ ÇALIŞMA SAYACI — Tracking
+// ═══════════════════════════════════════════════════════════════════════
+function updateStudyDaily(uid, date, deltaSeconds, blocks, mode) {
+  const now = Date.now();
+  const existing = db.prepare('SELECT * FROM study_daily WHERE uid=? AND date=?').get(uid, date);
+  if (existing) {
+    db.prepare(
+      'UPDATE study_daily SET total_seconds = MAX(total_seconds, ?), completed_blocks = MAX(completed_blocks, ?), last_ts = ?, mode = COALESCE(?, mode) WHERE uid=? AND date=?'
+    ).run(deltaSeconds, blocks, now, mode, uid, date);
+  } else {
+    db.prepare(
+      'INSERT INTO study_daily (uid, date, total_seconds, completed_blocks, mode, first_ts, last_ts) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(uid, date, deltaSeconds, blocks, mode, now, now);
+  }
+}
+
+app.post('/pdftest/api/study/event', requireAuth, (req, res) => {
+  try {
+    const uid = req.uid;
+    const body = req.body || {};
+    const events = Array.isArray(body.events) ? body.events : [body];
+    const insert = db.prepare(
+      'INSERT OR IGNORE INTO study_events (uid, event_id, type, ts, date, mode, phase, elapsed_in_phase, today_total_seconds, completed_blocks, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    );
+    const trx = db.transaction((evs) => {
+      for (const e of evs) {
+        if (!e.event_id || !e.type || !e.ts || !e.date) continue;
+        insert.run(uid, String(e.event_id), String(e.type), Number(e.ts) || Date.now(),
+          String(e.date), e.mode || null, e.phase || null,
+          Number(e.elapsed_in_phase) || 0, Number(e.today_total_seconds) || 0,
+          Number(e.completed_blocks) || 0, e.meta ? JSON.stringify(e.meta) : null);
+        updateStudyDaily(uid, e.date, Number(e.today_total_seconds) || 0, Number(e.completed_blocks) || 0, e.mode);
+      }
+    });
+    trx(events);
+    res.json({ ok: true, accepted: events.length });
+  } catch (e) {
+    console.error('study/event error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+app.post('/pdftest/api/study/state', (req, res, next) => {
+  const beaconToken = req.query.beacon_token;
+  if (beaconToken && !req.headers.authorization) req.headers.authorization = `Bearer ${beaconToken}`;
+  next();
+}, requireAuth, (req, res) => {
+  try {
+    const uid = req.uid;
+    const s = req.body || {};
+    db.prepare(
+      'INSERT OR REPLACE INTO study_state (uid, phase, mode, phase_started_at, accumulated_in_phase, completed_blocks, today_total_seconds, today_date, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(uid, s.phase || 'idle', s.mode || 'deepwork',
+      Number(s.phase_started_at) || 0, Number(s.accumulated_in_phase) || 0,
+      Number(s.completed_blocks) || 0, Number(s.today_total_seconds) || 0,
+      s.today_date || '', Date.now());
+    if (s.today_date && typeof s.today_total_seconds === 'number') {
+      updateStudyDaily(uid, s.today_date, Number(s.today_total_seconds), Number(s.completed_blocks) || 0, s.mode);
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('study/state POST error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+app.get('/pdftest/api/study/state', requireAuth, (req, res) => {
+  try {
+    const row = db.prepare('SELECT * FROM study_state WHERE uid=?').get(req.uid);
+    if (!row) return res.json({ state: null });
+    res.json({
+      state: {
+        phase: row.phase, mode: row.mode,
+        phase_started_at: row.phase_started_at,
+        accumulated_in_phase: row.accumulated_in_phase,
+        completed_blocks: row.completed_blocks,
+        today_total_seconds: row.today_total_seconds,
+        today_date: row.today_date, updated_at: row.updated_at,
+      },
+    });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.get('/pdftest/api/study/daily', requireAuth, (req, res) => {
+  try {
+    const days = Math.min(365, Math.max(1, parseInt(req.query.days) || 30));
+    const rows = db.prepare(
+      'SELECT date, total_seconds, completed_blocks, mode FROM study_daily WHERE uid=? ORDER BY date DESC LIMIT ?'
+    ).all(req.uid, days);
+    res.json({ daily: rows });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.get('/pdftest/api/study/settings', requireAuth, (req, res) => {
+  try {
+    const row = db.prepare("SELECT data FROM notes WHERE uid=? AND id='__study_settings__'").get(req.uid);
+    if (!row) return res.json({ settings: null });
+    try { res.json({ settings: JSON.parse(row.data) }); }
+    catch { res.json({ settings: null }); }
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/pdftest/api/study/settings', requireAuth, (req, res) => {
+  try {
+    const data = JSON.stringify(req.body || {});
+    db.prepare("INSERT OR REPLACE INTO notes (id, uid, data, date) VALUES ('__study_settings__', ?, ?, ?)")
+      .run(req.uid, data, Date.now());
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/pdftest/api/client-error', async (req, res) => {
+  try {
+    const { message, stack, userAgent, url, mode, component } = req.body || {};
+    const logLine = JSON.stringify({
+      ts: new Date().toISOString(), message, stack, userAgent, url, mode, component,
+    }) + '\n';
+    try { fs.appendFileSync('/var/log/pdftest/client-errors.log', logLine); } catch {}
+    const TG_TOKEN = process.env.PDFTEST_TG_TOKEN;
+    const TG_CHAT_ID = process.env.PDFTEST_TG_CHAT_ID || '860174169';
+    if (TG_TOKEN && message) {
+      const short = String(message).slice(0, 200);
+      const text = '🐛 Frontend: ' + short + ' | URL: ' + (url || '?');
+      fetch('https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: TG_CHAT_ID, text, disable_notification: true }),
+      }).catch(()=>{});
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 pdftest backend port ${PORT} | data: ${DATA_DIR}`);

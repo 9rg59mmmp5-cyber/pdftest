@@ -893,6 +893,24 @@ export default function App() {
     });
   };
 
+  // Duraklatılmış çalışmaya devam et — sayaç KALDIĞI YERDEN
+  const resumeFromPause = () => {
+    setStudyState(s => {
+      if (s.phase !== 'paused') return s;
+      // phaseStartedAt'i öyle ayarla ki "Date.now() - phaseStartedAt" = accumulatedInPhase saniye
+      // Böylece sayaç kaldığı yerden devam eder
+      const newStartedAt = Date.now() - (s.accumulatedInPhase * 1000);
+      return {
+        ...s,
+        phase: 'working',
+        phaseStartedAt: newStartedAt,
+        // accumulatedInPhase'i koruyoruz ki todayTotalSeconds hesabında çift sayım olmasın
+      };
+    });
+    const preset = STUDY_PRESETS.find(p => p.id === studyStateRef.current.mode)!;
+    sendStudyNotif(`${preset.icon} Devam`, 'Sayaç kaldığı yerden devam ediyor');
+  };
+
   // Tamamen bitir — bugünkü oturumu kapat
   const stopStudy = () => {
     setStudyState(s => {
@@ -7403,7 +7421,7 @@ export default function App() {
               {studyState.phase === 'paused' && (
                 <>
                   <button
-                    onClick={startStudyWork}
+                    onClick={resumeFromPause}
                     className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-6 py-2.5 rounded-xl text-xs"
                   >▶ Devam</button>
                   <button

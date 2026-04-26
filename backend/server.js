@@ -583,6 +583,34 @@ app.post('/pdftest/api/client-error', async (req, res) => {
 });
 
 
+
+
+// ── Sınav tarihi (paylaşılan, sunucu-side) ────────────────────────────
+const EXAM_DATE_FILE = '/var/www/pdftest-data/exam_date.txt';
+
+app.get('/pdftest/api/study/exam-date', requireAuth, (req, res) => {
+  try {
+    let date = '';
+    try { date = fs.readFileSync(EXAM_DATE_FILE, 'utf8').trim(); } catch {}
+    res.json({ date });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+app.post('/pdftest/api/study/exam-date', requireAuth, (req, res) => {
+  try {
+    const { date } = req.body || {};
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'YYYY-MM-DD formatı bekleniyor' });
+    }
+    fs.writeFileSync(EXAM_DATE_FILE, date);
+    res.json({ ok: true, date });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 pdftest backend port ${PORT} | data: ${DATA_DIR}`);
 });

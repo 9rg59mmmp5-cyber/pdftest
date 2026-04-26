@@ -578,16 +578,62 @@ export default function App() {
   const [ustasiAchievementToast, setUstasiAchievementToast] = useState<string | null>(null);
 
   // ── Sınav tarihi (KPSS Önlisans için) ──────────────────────────────────
-  const [examDate, setExamDate] = useState<string>(''); // YYYY-MM-DD
+  // Default: 4 Ekim 2026 (KPSS Önlisans tarihi)
+  // Sunucuda /pdftest/api/study/exam-date'ten okunur, yoksa default kullanılır
+  const DEFAULT_EXAM_DATE = '2026-10-04';
+  const [examDate, setExamDate] = useState<string>('');
   useEffect(() => {
     (async () => {
-      const d = await localforage.getItem<string>('exam_date');
-      if (d) setExamDate(d);
+      // Önce localforage
+      const local = await localforage.getItem<string>('exam_date');
+      if (local) {
+        setExamDate(local);
+      } else {
+        // Local yoksa default'u uygula
+        setExamDate(DEFAULT_EXAM_DATE);
+        await localforage.setItem('exam_date', DEFAULT_EXAM_DATE);
+      }
+      // Sunucudan da çek (login olunca)
+      // user state burada hazır olmayabilir, ayrı useEffect'te halledilecek
     })();
   }, []);
+
+  // user yüklendikten sonra sunucudan exam date çek
+  useEffect(() => {
+    if (!user) return;
+    (async () => {
+      try {
+        const token = await user.getIdToken();
+        const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+        const r = await fetch(`${BASE}/study/exam-date`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (r.ok) {
+          const { date } = await r.json();
+          if (date && date !== examDate) {
+            setExamDate(date);
+            await localforage.setItem('exam_date', date);
+          }
+        }
+      } catch {}
+    })();
+  }, [user]);
+
   const persistExamDate = async (d: string) => {
     await localforage.setItem('exam_date', d);
     setExamDate(d);
+    // Sunucuya da kaydet
+    if (user) {
+      try {
+        const token = await user.getIdToken();
+        const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+        await fetch(`${BASE}/study/exam-date`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ date: d }),
+        });
+      } catch {}
+    }
   };
   const daysToExam = (): number | null => {
     if (!examDate) return null;
@@ -1220,30 +1266,51 @@ export default function App() {
     }, 50);
   };
 
-  // Otomatik phase geçişi — work bitti mi? break bitti mi?
+  // Otomatik phase geçişi — target time'ı hesapla, setTimeout ile tetikle
+  // Browser arka planda olsa bile setTimeout büyük ihtimalle çalışır
   useEffect(() => {
     if (studyState.phase === 'idle' || studyState.phase === 'paused') return;
     const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
-    const elapsedSec = Math.floor((Date.now() - studyState.phaseStartedAt) / 1000);
-    
+    if (studyState.phase === 'working' && preset.id === 'flexible') return;
+
+    let targetSec = 0;
     if (studyState.phase === 'working') {
-      const targetSec = preset.workMin * 60;
-      if (preset.id !== 'flexible' && elapsedSec >= targetSec) {
-        // Uzun mola zamanı mı?
-        const nextBlockNumber = studyState.completedWorkBlocks + 1;
-        const isLongBreak = nextBlockNumber % preset.longBreakEvery === 0;
-        startStudyBreak(isLongBreak);
-      }
+      targetSec = preset.workMin * 60;
     } else if (studyState.phase === 'break') {
       const blocksDone = studyState.completedWorkBlocks;
       const isLongBreak = blocksDone > 0 && blocksDone % preset.longBreakEvery === 0;
-      const breakTarget = (isLongBreak ? preset.longBreakMin : preset.breakMin) * 60;
-      if (elapsedSec >= breakTarget) {
+      targetSec = (isLongBreak ? preset.longBreakMin : preset.breakMin) * 60;
+    }
+    const elapsedSec = Math.floor((Date.now() - studyState.phaseStartedAt) / 1000);
+    const remainingMs = Math.max(0, (targetSec - elapsedSec)) * 1000;
+
+    // Hemen kontrol — arka plandan dönüldüğünde geçmiş olabilir
+    if (remainingMs <= 0) {
+      if (studyState.phase === 'working') {
+        const nextBlockNumber = studyState.completedWorkBlocks + 1;
+        const isLongBreak = nextBlockNumber % preset.longBreakEvery === 0;
+        startStudyBreak(isLongBreak);
+      } else if (studyState.phase === 'break') {
         sendStudyNotif('🔔 Mola bitti!', 'Tekrar çalışmaya başlayabilirsin.');
         setStudyState(s => ({ ...s, phase: 'idle' }));
       }
+      return;
     }
-  }, [studyTick, studyState.phase]);
+
+    // Hedef zamanda tetikle
+    const timer = setTimeout(() => {
+      if (studyStateRef.current.phase === 'working') {
+        const nextBlockNumber = studyStateRef.current.completedWorkBlocks + 1;
+        const isLongBreak = nextBlockNumber % preset.longBreakEvery === 0;
+        startStudyBreak(isLongBreak);
+      } else if (studyStateRef.current.phase === 'break') {
+        sendStudyNotif('🔔 Mola bitti!', 'Tekrar çalışmaya başlayabilirsin.');
+        setStudyState(s => ({ ...s, phase: 'idle' }));
+      }
+    }, remainingMs);
+
+    return () => clearTimeout(timer);
+  }, [studyState.phase, studyState.phaseStartedAt, studyState.mode]);
 
 
   // ── Analiz: zayıf konu / hata günlüğü hesapla ──────────────────────────
@@ -1465,6 +1532,8 @@ export default function App() {
   const sessionStartPageRef = useRef<number | null>(null);
   const maxPageReachedRef = useRef<number>(0);
   const [pagesRead, setPagesRead] = useState<number>(0); // bu session'da okunan sayfa sayısı
+  const [showPageGoalModal, setShowPageGoalModal] = useState<boolean>(false);
+  const [pageGoalInput, setPageGoalInput] = useState<string>('');
   // FIX: Not kategorisi seçimi (not kesme modalında)
   const [noteCropCategory, setNoteCropCategory] = useState<'onemli' | 'ornek' | 'tanim' | 'formul' | 'diger'>('onemli');
   // FIX: Notlar sayfasında kategori filtresi
@@ -4474,6 +4543,23 @@ export default function App() {
                   <Check size={18} />
                 </button>
               </div>
+              {/* Sol altta zoom butonları (Odak modu) */}
+              <div className="fixed bottom-4 left-2 z-[80] flex flex-col gap-2">
+                <button
+                  onClick={handleZoomIn}
+                  className="backdrop-blur-md w-11 h-11 rounded-full flex items-center justify-center shadow-lg border transition-all bg-slate-900/70 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/50"
+                  title="Yakınlaştır"
+                >
+                  <ZoomIn size={18} />
+                </button>
+                <button
+                  onClick={handleZoomOut}
+                  className="backdrop-blur-md w-11 h-11 rounded-full flex items-center justify-center shadow-lg border transition-all bg-slate-900/70 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/50"
+                  title="Uzaklaştır"
+                >
+                  <ZoomOut size={18} />
+                </button>
+              </div>
               {/* Üstte minimal ilerleme barı (sayfa hedefi varsa) */}
               {pageGoal > 0 && numPages && (() => {
                 const currentPage = twoPageView
@@ -4717,25 +4803,16 @@ export default function App() {
                     className={`px-2 py-1.5 rounded-lg text-sm transition-colors ${focusMode ? 'text-green-400 bg-green-900/30' : 'text-slate-400 hover:bg-slate-800'}`}
                     title={focusMode ? "Odak Modunu Kapat" : "Odak Modu (sadece PDF)"}
                   >{focusMode ? '👁️' : '🎯'}</button>
-                  {/* Sayfa Hedefi — tıkla ayarla */}
+                  {/* Sayfa Hedefi — modalı aç */}
                   <button
                     onClick={() => {
-                      const curr = pageGoal;
-                      const input = window.prompt('Bu oturumda kaç sayfa okumak istiyorsun?\n(0 = hedef yok)', curr.toString());
-                      if (input !== null) {
-                        const n = parseInt(input);
-                        if (!isNaN(n) && n >= 0) {
-                          setPageGoal(n);
-                          sessionStartPageRef.current = null;
-                          setPagesRead(0);
-                          maxPageReachedRef.current = 0;
-                        }
-                      }
+                      setPageGoalInput(pageGoal > 0 ? pageGoal.toString() : '');
+                      setShowPageGoalModal(true);
                     }}
-                    className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 ${pageGoal > 0 ? 'text-amber-400 bg-amber-900/20' : 'text-slate-400 hover:bg-slate-800'}`}
+                    className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 ${pageGoal > 0 ? 'text-emerald-400 bg-emerald-900/20' : 'text-slate-400 hover:bg-slate-800'}`}
                     title="Sayfa Hedefi"
                   >
-                    🎯
+                    📖
                     {pageGoal > 0 && (
                       <span className="tabular-nums">{pagesRead}/{pageGoal}</span>
                     )}
@@ -5716,6 +5793,104 @@ export default function App() {
   };
 
   // FIX: Soru kayıt modalı — ana mount'tan çağrılır ki PDF olmasa bile çalışsın (fotoğraftan ekleme için)
+  const renderPageGoalModal = () => {
+    if (!showPageGoalModal) return null;
+    const presets = [10, 20, 30, 50, 75, 100];
+    const setVal = (n: number) => {
+      setPageGoal(n);
+      sessionStartPageRef.current = null;
+      setPagesRead(0);
+      maxPageReachedRef.current = 0;
+      try { localStorage.setItem('pageGoal', String(n)); } catch {}
+      setShowPageGoalModal(false);
+    };
+    return (
+      <div
+        className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200"
+        onClick={() => setShowPageGoalModal(false)}
+      >
+        <div
+          className="bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 rounded-2xl p-5 w-full max-w-sm border border-slate-700/50 shadow-2xl shadow-emerald-900/20"
+          onClick={e => e.stopPropagation()}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <div className="text-3xl">📖</div>
+            <div>
+              <h3 className="text-lg font-bold text-white">Sayfa Hedefi</h3>
+              <p className="text-[11px] text-slate-400">Bu oturumda hedeflediğin sayfa sayısı</p>
+            </div>
+          </div>
+
+          {/* Hızlı seçenekler */}
+          <div className="grid grid-cols-3 gap-1.5 mt-4 mb-3">
+            {presets.map(n => (
+              <button
+                key={n}
+                onClick={() => setVal(n)}
+                className={`rounded-xl py-2.5 text-sm font-bold border transition-all ${
+                  pageGoal === n
+                    ? 'bg-emerald-600 text-white border-emerald-500 shadow-lg shadow-emerald-900/40'
+                    : 'bg-slate-800/60 text-slate-200 border-slate-700/50 hover:border-emerald-600/40 hover:bg-slate-800'
+                }`}
+              >{n} sayfa</button>
+            ))}
+          </div>
+
+          {/* Custom input */}
+          <div className="mb-3">
+            <label className="block text-[11px] text-slate-400 mb-1">Veya özel:</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                inputMode="numeric"
+                min={0}
+                max={1000}
+                value={pageGoalInput}
+                onChange={e => setPageGoalInput(e.target.value.replace(/[^0-9]/g, ''))}
+                placeholder="Sayfa sayısı"
+                className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
+                autoFocus
+              />
+              <button
+                onClick={() => {
+                  const n = parseInt(pageGoalInput) || 0;
+                  setVal(n);
+                }}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-4 py-2 rounded-xl text-sm transition-colors"
+              >Ayarla</button>
+            </div>
+          </div>
+
+          {/* Mevcut durum + temizle */}
+          {pageGoal > 0 && (
+            <div className="bg-slate-800/40 rounded-xl p-2.5 mb-3 flex items-center justify-between">
+              <div>
+                <div className="text-[11px] text-slate-400">Mevcut</div>
+                <div className="text-sm font-bold text-emerald-400">{pagesRead} / {pageGoal} sayfa</div>
+              </div>
+              <button
+                onClick={() => setVal(0)}
+                className="text-xs text-rose-400 hover:text-rose-300 px-2 py-1"
+              >Hedefi Kaldır</button>
+            </div>
+          )}
+
+          {/* Tip */}
+          <div className="text-[10px] text-slate-500 leading-relaxed bg-slate-800/30 rounded-lg p-2 border border-slate-800/60">
+            💡 İpucu: Yoğun çalışma için 30-50 sayfa, kısa oturum için 10-20 sayfa idealdir. KPSS'de günlük 50-80 sayfa hedeflenmelidir.
+          </div>
+
+          <div className="flex justify-end gap-2 mt-3">
+            <button
+              onClick={() => setShowPageGoalModal(false)}
+              className="text-sm text-slate-400 hover:text-white px-3 py-1.5 rounded-lg"
+            >Kapat</button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderQuestionCropModal = () => {
     if (!showCropModal || !cropImage) return null;
     return (
@@ -6402,7 +6577,8 @@ export default function App() {
   const exportNotesToPDF = async (
     notesToExport: SavedNote[],
     filename = 'Notlarim.pdf',
-    layout: 'compact' | 'study' = 'study'
+    layout: 'compact' | 'study' = 'study',
+    showSource: boolean = false
   ) => {
     if (notesToExport.length === 0) return;
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
@@ -6458,7 +6634,7 @@ export default function App() {
       const ratio = img.width > 0 ? img.width / img.height : 1;
       let iw = colW - 4, ih = iw / ratio;
       if (ih > maxImgH) { ih = maxImgH; iw = ih * ratio; }
-      const cardH = ih + (note.title ? 13 : 7) + (note.pdfName ? 5 : 0);
+      const cardH = ih + (note.title ? 13 : 7) + (showSource && note.pdfName ? 5 : 0);
 
       if (y + cardH > H - M) {
         col++;
@@ -6486,7 +6662,7 @@ export default function App() {
       doc.setFillColor(255, 255, 255);
       doc.roundedRect(x + 2, imgY, colW - 4, ih, 1, 1, 'F');
       try { doc.addImage(img, 'JPEG', x + 2 + (colW - 4 - iw) / 2, imgY, iw, ih); } catch {}
-      if (note.pdfName) {
+      if (showSource && note.pdfName) {
         doc.setFontSize(5.5); doc.setFont('helvetica', 'normal'); doc.setTextColor(100, 116, 139);
         doc.text(`📄 ${note.pdfName}${note.page ? ` S.${note.page}` : ''}`.substring(0, 48), x + 2, y + cardH - 1.5);
       }
@@ -7585,11 +7761,12 @@ export default function App() {
       : 'Henüz blok yok';
 
     // Son 7 gün
+    const todayKey = todayStr();
     const last7 = Array.from({ length: 7 }, (_, i) => {
       const d = new Date();
       d.setDate(d.getDate() - (6 - i));
       const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-      const rec = key === studyState.todayDate
+      const rec = key === todayKey
         ? { date: key, totalSeconds: liveTotal }
         : studyHistory.find(h => h.date === key) || { date: key, totalSeconds: 0 };
       return { ...rec, dayLabel: ['Pzt','Sal','Çar','Per','Cum','Cmt','Paz'][(d.getDay() + 6) % 7] };
@@ -9322,20 +9499,15 @@ export default function App() {
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     {(questions as SavedQuestion[]).map(q => (
                       <div key={q.id} className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-lg group hover:border-slate-700 hover:shadow-xl hover:shadow-blue-900/10 transition-all duration-300 flex flex-col">
-                        <div className="p-3 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
-                          <div className="flex items-center gap-2">
+                        <div className="px-2.5 py-1.5 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
+                          <div className="flex items-center gap-1.5">
                             {q.questionNumber > 0 && (
-                              <span className="text-xs font-bold text-slate-400 bg-slate-800 px-2 py-1 rounded-md">Soru {q.questionNumber}</span>
+                              <span className="text-[10px] font-medium text-slate-500 bg-slate-800/60 px-1.5 py-0.5 rounded">#{q.questionNumber}</span>
                             )}
-                            {q.topic && (
-                              <span className="text-xs font-medium text-blue-400 bg-blue-500/10 px-2 py-1 rounded-md truncate max-w-[150px]" title={q.topic}>
-                                {q.topic}
-                              </span>
-                            )}
-                            <span className={`text-xs font-bold px-2 py-1 rounded-md ${
-                              q.difficulty === 'Kolay' ? 'bg-emerald-500/20 text-emerald-400' :
-                              q.difficulty === 'Orta' ? 'bg-amber-500/20 text-amber-400' :
-                              'bg-rose-500/20 text-rose-400'
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                              q.difficulty === 'Kolay' ? 'bg-emerald-500/15 text-emerald-400' :
+                              q.difficulty === 'Orta' ? 'bg-amber-500/15 text-amber-400' :
+                              'bg-rose-500/15 text-rose-400'
                             }`}>
                               {q.difficulty}
                             </span>
@@ -9736,6 +9908,7 @@ export default function App() {
       {gameModeQuestions && renderGameMode()}
       {renderNoteModal()}
       {renderQuestionCropModal()}
+      {renderPageGoalModal()}
       {renderNoteLayoutBuilder()}
       {renderNoteReview()}
       {renderAddMemorizeModal()}

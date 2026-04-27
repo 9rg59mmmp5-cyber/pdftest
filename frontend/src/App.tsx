@@ -1091,6 +1091,33 @@ export default function App() {
     }
   }, [user]);
 
+  // Çalışma sayfasına her girişte history'yi tazele
+  useEffect(() => {
+    if (mode !== 'calisma' || !user) return;
+    (async () => {
+      try {
+        const token = await user.getIdToken();
+        const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+        const r = await fetch(`${BASE}/study/daily?days=90`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (r.ok) {
+          const { daily } = await r.json();
+          if (Array.isArray(daily) && daily.length > 0) {
+            setStudyHistory(daily.map((d: any) => ({
+              date: d.date,
+              totalSeconds: d.total_seconds,
+              workBlocks: d.completed_blocks,
+              breaks: 0,
+              mode: d.mode,
+              timeline: [],
+            })));
+          }
+        }
+      } catch {}
+    })();
+  }, [mode, user]);
+
   // 30 sn'de bir heartbeat — aktif çalışma varsa
   useEffect(() => {
     const hb = setInterval(() => {
@@ -1625,6 +1652,7 @@ export default function App() {
   const maxPageReachedRef = useRef<number>(0);
   const [pagesRead, setPagesRead] = useState<number>(0); // bu session'da okunan sayfa sayısı
   const [showPageGoalModal, setShowPageGoalModal] = useState<boolean>(false);
+  const [studyStatsTab, setStudyStatsTab] = useState<'week' | 'month' | 'detail'>('week');
   const [pageGoalInput, setPageGoalInput] = useState<string>('');
   // FIX: Not kategorisi seçimi (not kesme modalında)
   const [noteCropCategory, setNoteCropCategory] = useState<'onemli' | 'ornek' | 'tanim' | 'formul' | 'diger'>('onemli');
@@ -8050,45 +8078,328 @@ export default function App() {
             </div>
           )}
 
-          {/* Son 7 gün grafik */}
+          {/* İstatistik Paneli — 3 Sekme: Hafta / Ay / Detay */}
           <div className="bg-slate-800/40 border border-slate-700/30 rounded-2xl p-4">
+            {/* Sekme başlığı */}
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-bold text-slate-200">📈 Son 7 Gün</h3>
-              <div className="text-right">
-                <div className="text-[10px] text-slate-500">Haftalık ort.</div>
-                <div className="text-xs font-bold text-blue-400">{formatHMS(weekAvg)}/gün</div>
+              <h3 className="text-sm font-bold text-slate-200">📊 İstatistikler</h3>
+              <div className="flex items-center gap-0.5 bg-slate-900/60 rounded-lg p-0.5">
+                {[
+                  { id: 'week', label: 'Hafta' },
+                  { id: 'month', label: 'Ay' },
+                  { id: 'detail', label: 'Detay' },
+                ].map(t => (
+                  <button
+                    key={t.id}
+                    onClick={() => setStudyStatsTab(t.id as any)}
+                    className={`text-[10px] font-bold px-2.5 py-1 rounded-md transition-colors ${
+                      studyStatsTab === t.id
+                        ? 'bg-blue-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >{t.label}</button>
+                ))}
               </div>
             </div>
-            <div className="flex items-end justify-between gap-1.5 h-24">
-              {last7.map((d, i) => {
-                const hitGoal = d.totalSeconds >= goalSec;
-                const heightPct = maxDaySec > 0 ? (d.totalSeconds / maxDaySec) * 100 : 0;
-                const isToday = i === 6;
-                return (
-                  <div key={d.date} className="flex-1 flex flex-col items-center gap-1">
-                    <div className="flex-1 w-full flex flex-col justify-end">
-                      <div
-                        className={`w-full rounded-t-md transition-all ${
-                          hitGoal ? 'bg-emerald-500' :
-                          d.totalSeconds > goalSec * 0.5 ? 'bg-blue-500' :
-                          d.totalSeconds > 0 ? 'bg-amber-500' : 'bg-slate-700'
-                        } ${isToday ? 'ring-2 ring-white/20' : ''}`}
-                        style={{ height: `${Math.max(2, heightPct)}%` }}
-                        title={`${d.dayLabel}: ${formatHMS(d.totalSeconds)}`}
-                      />
+
+            {/* HAFTA */}
+            {studyStatsTab === 'week' && (() => {
+              const goalH = goalSec / 3600;
+              return (
+                <div>
+                  {/* Üst özet */}
+                  <div className="grid grid-cols-3 gap-2 mb-3">
+                    <div className="bg-slate-900/40 rounded-lg p-2 text-center">
+                      <div className="text-[9px] text-slate-500">Toplam</div>
+                      <div className="text-sm font-bold text-blue-400">{formatHMS(weekTotal)}</div>
                     </div>
-                    <div className={`text-[9px] ${isToday ? 'text-white font-bold' : 'text-slate-500'}`}>
-                      {d.dayLabel}
+                    <div className="bg-slate-900/40 rounded-lg p-2 text-center">
+                      <div className="text-[9px] text-slate-500">Ortalama</div>
+                      <div className="text-sm font-bold text-violet-400">{formatHMS(weekAvg)}/gün</div>
+                    </div>
+                    <div className="bg-slate-900/40 rounded-lg p-2 text-center">
+                      <div className="text-[9px] text-slate-500">Hedefli gün</div>
+                      <div className="text-sm font-bold text-emerald-400">
+                        {last7.filter(d => d.totalSeconds >= goalSec).length}/7
+                      </div>
                     </div>
                   </div>
-                );
-              })}
-            </div>
-            <div className="mt-2 flex items-center gap-3 text-[9px] text-slate-400">
-              <span className="flex items-center gap-1"><span className="w-2 h-2 bg-emerald-500 rounded-sm" /> Hedefe ulaştın</span>
-              <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-sm" /> &gt;%50</span>
-              <span className="flex items-center gap-1"><span className="w-2 h-2 bg-amber-500 rounded-sm" /> Eksik</span>
-            </div>
+
+                  {/* Bar chart with goal line */}
+                  <div className="relative">
+                    {/* Hedef çizgisi */}
+                    {maxDaySec > 0 && goalSec <= maxDaySec && (
+                      <div
+                        className="absolute left-0 right-0 border-t-2 border-dashed border-emerald-500/40 pointer-events-none flex items-center justify-end pr-1"
+                        style={{ bottom: `${(goalSec / maxDaySec) * 100}%` }}
+                      >
+                        <span className="text-[8px] text-emerald-400/80 bg-slate-900/80 px-1 rounded">{Math.floor(goalH)}s hedef</span>
+                      </div>
+                    )}
+                    <div className="flex items-end justify-between gap-2 h-32 relative">
+                      {last7.map((d, i) => {
+                        const hitGoal = d.totalSeconds >= goalSec;
+                        const heightPct = maxDaySec > 0 ? (d.totalSeconds / maxDaySec) * 100 : 0;
+                        const isToday = i === 6;
+                        return (
+                          <div key={d.date} className="flex-1 flex flex-col items-center gap-0.5 group">
+                            <div className="text-[8px] text-slate-400 font-mono opacity-0 group-hover:opacity-100 transition-opacity h-3">
+                              {d.totalSeconds > 0 ? formatHMS(d.totalSeconds) : ''}
+                            </div>
+                            <div className="flex-1 w-full flex flex-col justify-end relative">
+                              <div
+                                className={`w-full rounded-t-md transition-all ${
+                                  hitGoal ? 'bg-gradient-to-t from-emerald-600 to-emerald-400' :
+                                  d.totalSeconds > goalSec * 0.7 ? 'bg-gradient-to-t from-blue-600 to-blue-400' :
+                                  d.totalSeconds > goalSec * 0.3 ? 'bg-gradient-to-t from-amber-600 to-amber-400' :
+                                  d.totalSeconds > 0 ? 'bg-gradient-to-t from-rose-600 to-rose-400' : 
+                                  'bg-slate-700/40'
+                                } ${isToday ? 'ring-2 ring-white/30' : ''}`}
+                                style={{ height: `${Math.max(2, heightPct)}%` }}
+                                title={`${d.dayLabel}: ${formatHMS(d.totalSeconds)}`}
+                              />
+                              {/* Saat sayısı bar üstünde her zaman */}
+                              {d.totalSeconds > 0 && (
+                                <div
+                                  className="absolute left-0 right-0 text-center text-[8px] font-bold text-white/90 pointer-events-none"
+                                  style={{ bottom: `${Math.min(95, heightPct + 1)}%` }}
+                                >
+                                  {Math.floor(d.totalSeconds / 3600)}{Math.floor(d.totalSeconds / 3600) > 0 ? 's' : ''}{Math.floor((d.totalSeconds % 3600) / 60) > 0 ? `${Math.floor((d.totalSeconds % 3600) / 60)}d` : ''}
+                                </div>
+                              )}
+                            </div>
+                            <div className={`text-[10px] font-medium ${isToday ? 'text-white' : 'text-slate-400'}`}>
+                              {d.dayLabel}
+                            </div>
+                            <div className={`text-[8px] ${isToday ? 'text-blue-400 font-bold' : 'text-slate-600'}`}>
+                              {parseInt(d.date.split('-')[2])}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  
+                  <div className="mt-3 flex items-center gap-2 text-[9px] text-slate-400 flex-wrap">
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 bg-emerald-500 rounded-sm" /> Hedef ✓</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-sm" /> %70+</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 bg-amber-500 rounded-sm" /> %30+</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 bg-rose-500 rounded-sm" /> Az</span>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* AY */}
+            {studyStatsTab === 'month' && (() => {
+              const todayKey = todayStr();
+              const last30 = Array.from({ length: 30 }, (_, i) => {
+                const d = new Date();
+                d.setDate(d.getDate() - (29 - i));
+                const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                const total = key === todayKey 
+                  ? liveTotal 
+                  : (studyHistory.find(h => h.date === key)?.totalSeconds || 0);
+                return { date: key, totalSeconds: total, day: d.getDate(), month: d.getMonth() + 1 };
+              });
+              const monthTotal = last30.reduce((s, d) => s + d.totalSeconds, 0);
+              const monthAvg = Math.floor(monthTotal / 30);
+              const activeDays = last30.filter(d => d.totalSeconds > 0).length;
+              const goaledDays = last30.filter(d => d.totalSeconds >= goalSec).length;
+              const maxMonthDay = Math.max(1, ...last30.map(d => d.totalSeconds));
+
+              const intensity = (sec: number) => {
+                if (sec === 0) return 'bg-slate-800/30';
+                const pct = sec / goalSec;
+                if (pct >= 1) return 'bg-emerald-500';
+                if (pct >= 0.7) return 'bg-emerald-600/70';
+                if (pct >= 0.4) return 'bg-blue-600/70';
+                if (pct >= 0.2) return 'bg-amber-600/70';
+                return 'bg-rose-600/50';
+              };
+
+              return (
+                <div>
+                  <div className="grid grid-cols-3 gap-2 mb-3">
+                    <div className="bg-slate-900/40 rounded-lg p-2 text-center">
+                      <div className="text-[9px] text-slate-500">30 gün</div>
+                      <div className="text-sm font-bold text-blue-400">{formatHMS(monthTotal)}</div>
+                    </div>
+                    <div className="bg-slate-900/40 rounded-lg p-2 text-center">
+                      <div className="text-[9px] text-slate-500">Aktif gün</div>
+                      <div className="text-sm font-bold text-violet-400">{activeDays}/30</div>
+                    </div>
+                    <div className="bg-slate-900/40 rounded-lg p-2 text-center">
+                      <div className="text-[9px] text-slate-500">Hedefli</div>
+                      <div className="text-sm font-bold text-emerald-400">{goaledDays}/30</div>
+                    </div>
+                  </div>
+
+                  {/* Heatmap — 6 hafta x 5 gün */}
+                  <div className="grid grid-cols-10 gap-1">
+                    {last30.map((d, i) => {
+                      const isToday = d.date === todayKey;
+                      return (
+                        <div
+                          key={d.date}
+                          className={`aspect-square rounded ${intensity(d.totalSeconds)} ${isToday ? 'ring-2 ring-white' : ''} relative group cursor-help`}
+                          title={`${d.day}/${d.month}: ${formatHMS(d.totalSeconds)}`}
+                        >
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            <span className={`text-[9px] font-bold ${d.totalSeconds > 0 ? 'text-white' : 'text-slate-600'}`}>
+                              {d.day}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-3 flex items-center justify-between text-[9px] text-slate-400">
+                    <span>Az</span>
+                    <div className="flex gap-0.5">
+                      <div className="w-3 h-3 bg-slate-800/30 rounded" />
+                      <div className="w-3 h-3 bg-rose-600/50 rounded" />
+                      <div className="w-3 h-3 bg-amber-600/70 rounded" />
+                      <div className="w-3 h-3 bg-blue-600/70 rounded" />
+                      <div className="w-3 h-3 bg-emerald-600/70 rounded" />
+                      <div className="w-3 h-3 bg-emerald-500 rounded" />
+                    </div>
+                    <span>Hedef ✓</span>
+                  </div>
+                  
+                  <div className="mt-3 text-[10px] text-slate-500 text-center">
+                    Ortalama: <span className="text-violet-400 font-bold">{formatHMS(monthAvg)}/gün</span>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* DETAY */}
+            {studyStatsTab === 'detail' && (() => {
+              const todayKey = todayStr();
+              const allHistory = [
+                ...studyHistory,
+                { date: todayKey, totalSeconds: liveTotal, workBlocks: studyState.completedWorkBlocks, breaks: 0, mode: studyState.mode, timeline: [] }
+              ].filter((v, i, arr) => arr.findIndex(x => x.date === v.date) === i);
+              
+              const sorted = [...allHistory].sort((a, b) => b.totalSeconds - a.totalSeconds);
+              const bestDay = sorted[0];
+              const totalAll = allHistory.reduce((s, d) => s + d.totalSeconds, 0);
+              const activeDays = allHistory.filter(d => d.totalSeconds > 0).length;
+              const goalReached = allHistory.filter(d => d.totalSeconds >= goalSec).length;
+              const totalBlocks = allHistory.reduce((s, d) => s + (d.workBlocks || 0), 0);
+              
+              // Mod kullanım
+              const modeStats: Record<string, number> = {};
+              allHistory.forEach(d => {
+                if (d.mode && d.totalSeconds > 0) {
+                  modeStats[d.mode] = (modeStats[d.mode] || 0) + d.totalSeconds;
+                }
+              });
+              const topMode = Object.entries(modeStats).sort((a, b) => b[1] - a[1])[0];
+              
+              // Sınava kalan günde olası ulaşılacak total
+              const days = examDate ? Math.max(0, Math.ceil((new Date(examDate).getTime() - Date.now()) / 86400000)) : 0;
+              const projection = days > 0 ? days * (Math.floor(totalAll / Math.max(1, activeDays))) : 0;
+
+              return (
+                <div className="space-y-2.5">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="bg-slate-900/40 rounded-lg p-3">
+                      <div className="text-[10px] text-slate-500">📚 Toplam Çalışma</div>
+                      <div className="text-lg font-bold text-blue-400">{formatHMS(totalAll)}</div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">{allHistory.length} gün boyunca</div>
+                    </div>
+                    <div className="bg-slate-900/40 rounded-lg p-3">
+                      <div className="text-[10px] text-slate-500">🎯 Hedefe Ulaştığın Gün</div>
+                      <div className="text-lg font-bold text-emerald-400">{goalReached}</div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">/{allHistory.length} gün ({allHistory.length > 0 ? Math.round((goalReached/allHistory.length)*100) : 0}%)</div>
+                    </div>
+                    <div className="bg-slate-900/40 rounded-lg p-3">
+                      <div className="text-[10px] text-slate-500">🔥 Aktif Gün</div>
+                      <div className="text-lg font-bold text-orange-400">{activeDays}</div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">/{allHistory.length} gün</div>
+                    </div>
+                    <div className="bg-slate-900/40 rounded-lg p-3">
+                      <div className="text-[10px] text-slate-500">📦 Tamamlanan Blok</div>
+                      <div className="text-lg font-bold text-violet-400">{totalBlocks}</div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">{activeDays > 0 ? (totalBlocks/activeDays).toFixed(1) : 0} ort/gün</div>
+                    </div>
+                  </div>
+
+                  {bestDay && bestDay.totalSeconds > 0 && (
+                    <div className="bg-gradient-to-br from-emerald-950/30 to-blue-950/20 border border-emerald-700/30 rounded-xl p-3">
+                      <div className="text-[10px] text-emerald-400 mb-1">🏆 En Verimli Gün</div>
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="text-base font-bold text-white">{bestDay.date}</div>
+                          <div className="text-[10px] text-slate-400">{(bestDay as any).workBlocks || 0} blok tamamlandı</div>
+                        </div>
+                        <div className="text-2xl font-bold text-emerald-400">{formatHMS(bestDay.totalSeconds)}</div>
+                      </div>
+                    </div>
+                  )}
+
+                  {topMode && (
+                    <div className="bg-slate-900/40 rounded-xl p-3">
+                      <div className="text-[10px] text-slate-500 mb-2">⚙️ En Çok Kullandığın Mod</div>
+                      <div className="space-y-1.5">
+                        {Object.entries(modeStats).sort((a, b) => b[1] - a[1]).map(([mode, sec]) => {
+                          const pct = totalAll > 0 ? (sec / totalAll) * 100 : 0;
+                          const preset = STUDY_PRESETS.find(p => p.id === mode as any);
+                          return (
+                            <div key={mode}>
+                              <div className="flex items-center justify-between text-[11px] mb-0.5">
+                                <span className="text-white">{preset?.icon} {preset?.name || mode}</span>
+                                <span className="text-slate-400">{formatHMS(sec)} (%{Math.round(pct)})</span>
+                              </div>
+                              <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                                <div className="h-full bg-violet-500 rounded-full" style={{ width: `${pct}%` }} />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {days > 0 && projection > 0 && (
+                    <div className="bg-blue-950/20 border border-blue-700/30 rounded-xl p-3">
+                      <div className="text-[10px] text-blue-300 mb-1">📈 Sınava Kadar Tahmini</div>
+                      <div className="text-base text-white">
+                        Mevcut tempoyla <span className="font-bold text-blue-400">{Math.round(projection / 3600)}</span> saat çalışabilirsin
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-1">Sınava {days} gün kaldı · Aktif gün ortalaması</div>
+                    </div>
+                  )}
+
+                  {/* Refresh */}
+                  <button
+                    onClick={async () => {
+                      if (!user) return;
+                      try {
+                        const token = await user.getIdToken();
+                        const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+                        const r = await fetch(`${BASE}/study/daily?days=90`, {
+                          headers: { Authorization: `Bearer ${token}` },
+                        });
+                        if (r.ok) {
+                          const { daily } = await r.json();
+                          if (Array.isArray(daily)) {
+                            setStudyHistory(daily.map((d: any) => ({
+                              date: d.date, totalSeconds: d.total_seconds,
+                              workBlocks: d.completed_blocks, breaks: 0, mode: d.mode, timeline: [],
+                            })));
+                          }
+                        }
+                      } catch {}
+                    }}
+                    className="w-full text-xs text-slate-400 hover:text-white py-2 rounded-lg bg-slate-900/40 hover:bg-slate-900 transition-colors flex items-center justify-center gap-1.5"
+                  ><RefreshCw size={12} /> Sunucudan yenile</button>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Streak + istatistik */}

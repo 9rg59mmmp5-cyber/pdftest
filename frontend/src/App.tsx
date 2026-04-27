@@ -734,10 +734,11 @@ export default function App() {
         if (s) {
           // Gün değişmiş mi kontrol — eğer evet dünkü toplamı history'ye ekle
           if (s.todayDate !== todayStr()) {
-            if (s.todayTotalSeconds > 0 && h) {
-              const already = h.find(x => x.date === s.todayDate);
+            const histArr = Array.isArray(h) ? h : [];
+            if (s.todayTotalSeconds > 0) {
+              const already = histArr.find(x => x.date === s.todayDate);
               if (!already) {
-                h.push({
+                histArr.push({
                   date: s.todayDate,
                   totalSeconds: s.todayTotalSeconds,
                   workBlocks: s.completedWorkBlocks,
@@ -745,7 +746,8 @@ export default function App() {
                   mode: s.mode,
                   timeline: [],
                 });
-                await localforage.setItem('study_history', h);
+                await localforage.setItem('study_history', histArr);
+                setStudyHistory(histArr);
               }
             }
             // Bugün için sıfırla
@@ -802,10 +804,10 @@ export default function App() {
 
   // Ticker — her saniye bir render trigger (sayaç görünsün diye)
   useEffect(() => {
-    if (studyState.phase === 'working' || studyState.phase === 'break') {
-      const t = setInterval(() => setStudyTick(v => v + 1), 1000);
-      return () => clearInterval(t);
-    }
+    // Aktif çalışma varken 1 saniye, idle iken 60 saniye tick (gün geçişi yakalansın)
+    const intervalMs = (studyState.phase === 'working' || studyState.phase === 'break') ? 1000 : 60000;
+    const t = setInterval(() => setStudyTick(v => v + 1), intervalMs);
+    return () => clearInterval(t);
   }, [studyState.phase]);
 
   // Gün değişimini yakala (örn 23:59 → 00:01 sırasında sayfa açıksa)
@@ -854,6 +856,36 @@ export default function App() {
       Notification.requestPermission().catch(()=>{});
     }
   }, [studyBrowserNotifOn]);
+
+  // Stale date watchdog — eğer studyState.todayDate gerçek günden farklı ise 
+  // anında rollover yap (gece geçişlerini garantili yakalamak için)
+  useEffect(() => {
+    const t = todayStr();
+    if (studyState.todayDate && studyState.todayDate !== t) {
+      // Dünkü total'i history'ye ekle
+      if (studyState.todayTotalSeconds > 0) {
+        setStudyHistory(prev => {
+          if (prev.find(x => x.date === studyState.todayDate)) return prev;
+          return [...prev, {
+            date: studyState.todayDate,
+            totalSeconds: studyState.todayTotalSeconds,
+            workBlocks: studyState.completedWorkBlocks,
+            breaks: 0, mode: studyState.mode, timeline: [],
+          }];
+        });
+      }
+      setStudyState(prev => ({
+        ...prev,
+        phase: prev.phase === 'working' ? 'working' : 'idle',
+        phaseStartedAt: prev.phase === 'working' ? Date.now() : 0,
+        accumulatedInPhase: 0,
+        completedWorkBlocks: 0,
+        todayTotalSeconds: 0,
+        todayDate: t,
+      }));
+      setTimeout(() => syncStudyStateToServer(), 200);
+    }
+  }, [studyState.todayDate, studyTick]);
 
   // ═══════════════════════════════════════════════════════════════════════
   // 🌐 SUNUCU SENKRONİZASYONU — Anlık kayıt + offline queue + crash recovery
@@ -973,20 +1005,50 @@ export default function App() {
 
       // Sunucu ve local arasında en güncel olanı tercih et
       const currentLocal = studyStateRef.current;
-      // Eğer sunucuda bir şey varsa ve local henüz idle ise sunucuyu kabul et
-      // (Ya da aynı gün ise ve local total=0 ise)
-      const sameDay = serverState.today_date === currentLocal.todayDate;
-      if (sameDay && serverState.today_total_seconds > currentLocal.todayTotalSeconds) {
+      const realToday = todayStr();
+
+      // EĞER sunucu eski bir tarih döndürdüyse → o gün artık geçmiş, sıfırla
+      // ve sunucuya bugünkü temiz state'i ilet
+      if (serverState.today_date && serverState.today_date !== realToday) {
+        // Dünkü hala history'de olmasa ekle (defansif)
+        if (serverState.today_total_seconds > 0) {
+          setStudyHistory(prev => {
+            if (prev.find(x => x.date === serverState.today_date)) return prev;
+            return [...prev, {
+              date: serverState.today_date,
+              totalSeconds: serverState.today_total_seconds,
+              workBlocks: serverState.completed_blocks || 0,
+              breaks: 0, mode: serverState.mode, timeline: [],
+            }];
+          });
+        }
+        // Bugün için temiz state
         setStudyState(s => ({
           ...s,
-          phase: serverState.phase || s.phase,
-          mode: serverState.mode || s.mode,
-          phaseStartedAt: serverState.phase_started_at || 0,
-          accumulatedInPhase: serverState.accumulated_in_phase || 0,
-          completedWorkBlocks: serverState.completed_blocks || 0,
-          todayTotalSeconds: serverState.today_total_seconds || 0,
-          todayDate: serverState.today_date || s.todayDate,
+          phase: 'idle',
+          phaseStartedAt: 0,
+          accumulatedInPhase: 0,
+          completedWorkBlocks: 0,
+          todayTotalSeconds: 0,
+          todayDate: realToday,
         }));
+        // Sunucuya da temiz state'i bildir
+        setTimeout(() => syncStudyStateToServer(), 200);
+      } else {
+        // Aynı gün — sunucu daha güncelse onu kabul et
+        const sameDay = serverState.today_date === currentLocal.todayDate;
+        if (sameDay && serverState.today_total_seconds > currentLocal.todayTotalSeconds) {
+          setStudyState(s => ({
+            ...s,
+            phase: serverState.phase || s.phase,
+            mode: serverState.mode || s.mode,
+            phaseStartedAt: serverState.phase_started_at || 0,
+            accumulatedInPhase: serverState.accumulated_in_phase || 0,
+            completedWorkBlocks: serverState.completed_blocks || 0,
+            todayTotalSeconds: serverState.today_total_seconds || 0,
+            todayDate: serverState.today_date || s.todayDate,
+          }));
+        }
       }
 
       // Günlük geçmişi de çek
@@ -1093,16 +1155,46 @@ export default function App() {
       if (document.visibilityState === 'hidden') {
         syncStudyStateToServer();
       } else if (document.visibilityState === 'visible') {
-        // Geri geldik — son state'i sunucudan çek (başka cihazda güncellenmiş olabilir)
-        // Ama sadece aktif çalışmıyorsak, aktifse kendi hesabımıza güveniyoruz
         const s = studyStateRef.current;
-        if (s.phase === 'idle') {
+        const realToday = todayStr();
+        // Önce gün değişimi kontrolü — uyandıktan sonra dünden devrolmuş state varsa rollover
+        if (s.todayDate !== realToday) {
+          // Dünkü total'i history'ye ekle
+          if (s.todayTotalSeconds > 0) {
+            setStudyHistory(prev => {
+              if (prev.find(x => x.date === s.todayDate)) return prev;
+              return [...prev, {
+                date: s.todayDate,
+                totalSeconds: s.todayTotalSeconds,
+                workBlocks: s.completedWorkBlocks,
+                breaks: 0, mode: s.mode, timeline: [],
+              }];
+            });
+          }
+          // Bugün için sıfırla
+          setStudyState(prev => ({
+            ...prev,
+            phase: prev.phase === 'working' ? 'working' : 'idle', // Çalışıyorsa devam etsin
+            phaseStartedAt: prev.phase === 'working' ? Date.now() : 0,
+            accumulatedInPhase: 0,
+            completedWorkBlocks: 0,
+            todayTotalSeconds: 0,
+            todayDate: realToday,
+          }));
+          sendStudyNotif('🌅 Yeni gün başladı', 'Sayaç sıfırlandı, dünkü kayıt edildi');
+          setTimeout(() => syncStudyStateToServer(), 200);
+        } else if (s.phase === 'idle') {
+          // Aynı gün ama idle — sunucudan en güncel durumu çek
           restoreFromServer();
         }
       }
     };
     document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', onVisibility);
+    };
   }, [user]);
 
   // Ayarları sunucuya sync (custom goal + notif toggles)
@@ -8066,6 +8158,49 @@ export default function App() {
                 : `Otomatik — sınava göre ${Math.floor(studyGoalMinutes/60)}s ${studyGoalMinutes%60}dk`}
             </div>
           </div>
+
+          {/* Bugünü manuel sıfırla — yanlış data toplamışsa */}
+          {studyState.phase === 'idle' && studyState.todayTotalSeconds > 0 && (
+            <div className="bg-rose-950/20 border border-rose-700/30 rounded-2xl p-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-xs font-bold text-rose-300">⚠️ Bugünü Sıfırla</div>
+                  <div className="text-[10px] text-rose-200/60">Toplam yanlış görünüyorsa</div>
+                </div>
+                <button
+                  onClick={async () => {
+                    if (window.confirm('Bugünkü tüm sayaç verisi sıfırlanacak. Devam edilsin mi?')) {
+                      const today = todayStr();
+                      setStudyState(s => ({
+                        ...s,
+                        phase: 'idle',
+                        phaseStartedAt: 0,
+                        accumulatedInPhase: 0,
+                        completedWorkBlocks: 0,
+                        todayTotalSeconds: 0,
+                        todayDate: today,
+                      }));
+                      // history'den de bugünü çıkar
+                      setStudyHistory(prev => prev.filter(h => h.date !== today));
+                      // Sunucuya da bildir
+                      if (user) {
+                        try {
+                          const token = await user.getIdToken();
+                          const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+                          await fetch(`${BASE}/study/reset-today`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                            body: JSON.stringify({ date: today }),
+                          });
+                        } catch {}
+                      }
+                    }
+                  }}
+                  className="bg-rose-700 hover:bg-rose-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg"
+                >Sıfırla</button>
+              </div>
+            </div>
+          )}
 
           {/* Bildirim ayarları */}
           <div className="bg-slate-800/40 border border-slate-700/30 rounded-2xl p-4">

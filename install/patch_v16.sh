@@ -28,16 +28,16 @@ fi
 echo "Mevcut tarih: $(cat $EXAM_DATE_FILE)"
 
 # 3) server.js'e exam-date endpoint ekle (yoksa)
-if ! grep -q "/pdftest/api/study/exam-date" "$SERVER"; then
-  cp "$SERVER" "${SERVER}.bak.$(date +%s)"
-  python3 <<'PYEOF'
+cp "$SERVER" "${SERVER}.bak.$(date +%s)"
+python3 <<'PYEOF'
 path = "/var/www/pdftest/backend/server.js"
 with open(path) as f:
     content = f.read()
 
-new_endpoints = '''
+snippets = []
 
-// ── Sınav tarihi (paylaşılan, sunucu-side) ────────────────────────────
+if '/pdftest/api/study/exam-date' not in content:
+    snippets.append('''
 const EXAM_DATE_FILE = '/var/www/pdftest-data/exam_date.txt';
 
 app.get('/pdftest/api/study/exam-date', requireAuth, (req, res) => {
@@ -54,7 +54,7 @@ app.post('/pdftest/api/study/exam-date', requireAuth, (req, res) => {
   try {
     const { date } = req.body || {};
     if (!date || !/^\\d{4}-\\d{2}-\\d{2}$/.test(date)) {
-      return res.status(400).json({ error: 'YYYY-MM-DD formatı bekleniyor' });
+      return res.status(400).json({ error: 'YYYY-MM-DD formati bekleniyor' });
     }
     fs.writeFileSync(EXAM_DATE_FILE, date);
     res.json({ ok: true, date });
@@ -62,18 +62,40 @@ app.post('/pdftest/api/study/exam-date', requireAuth, (req, res) => {
     res.status(500).json({ error: String(e) });
   }
 });
-'''
+''')
 
-if 'app.listen(' in content:
-    idx = content.find('app.listen(')
-    content = content[:idx] + new_endpoints + '\n' + content[idx:]
-    with open(path, 'w') as f:
-        f.write(content)
-    print("✅ exam-date endpointleri eklendi")
+if '/pdftest/api/study/reset-today' not in content:
+    snippets.append('''
+app.post('/pdftest/api/study/reset-today', requireAuth, (req, res) => {
+  try {
+    const uid = req.uid;
+    const { date } = req.body || {};
+    if (!date) return res.status(400).json({ error: 'date gerekli' });
+    db.prepare('DELETE FROM study_daily WHERE uid=? AND date=?').run(uid, date);
+    db.prepare("DELETE FROM study_events WHERE uid=? AND date=?").run(uid, date);
+    db.prepare(
+      'INSERT OR REPLACE INTO study_state (uid, phase, mode, phase_started_at, accumulated_in_phase, completed_blocks, today_total_seconds, today_date, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(uid, 'idle', 'deepwork', 0, 0, 0, 0, date, Date.now());
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+''')
+
+if snippets:
+    block = '\n'.join(snippets)
+    if 'app.listen(' in content:
+        idx = content.find('app.listen(')
+        content = content[:idx] + block + '\n' + content[idx:]
+        with open(path, 'w') as f:
+            f.write(content)
+        print(f"Eklendi: {len(snippets)} endpoint blok")
+    else:
+        print("app.listen bulunamadi")
+else:
+    print("Tum endpointler zaten var")
 PYEOF
-else
-  echo "ℹ exam-date endpointleri zaten var"
-fi
 
 # 4) PM2 yeniden başlat (env'leri yükle)
 echo "🚀 pm2 restart..."

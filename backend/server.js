@@ -611,6 +611,23 @@ app.post('/pdftest/api/study/exam-date', requireAuth, (req, res) => {
   }
 });
 
+
+app.post('/pdftest/api/study/reset-today', requireAuth, (req, res) => {
+  try {
+    const uid = req.uid;
+    const { date } = req.body || {};
+    if (!date) return res.status(400).json({ error: 'date gerekli' });
+    db.prepare('DELETE FROM study_daily WHERE uid=? AND date=?').run(uid, date);
+    db.prepare("DELETE FROM study_events WHERE uid=? AND date=?").run(uid, date);
+    db.prepare(
+      'INSERT OR REPLACE INTO study_state (uid, phase, mode, phase_started_at, accumulated_in_phase, completed_blocks, today_total_seconds, today_date, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(uid, 'idle', 'deepwork', 0, 0, 0, 0, date, Date.now());
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 pdftest backend port ${PORT} | data: ${DATA_DIR}`);
 });

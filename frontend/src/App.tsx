@@ -1118,6 +1118,60 @@ export default function App() {
     })();
   }, [mode, user]);
 
+  // ⚡ Cihazlar arası senkronizasyon — her 10 sn sunucudan state çek
+  // Çalışma sayfası açıkken aktif. Öteki cihazda değişmişse hemen yansıt.
+  useEffect(() => {
+    if (mode !== 'calisma' || !user) return;
+    const syncFromServer = async () => {
+      try {
+        const token = await user.getIdToken();
+        const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+        const r = await fetch(`${BASE}/study/state`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!r.ok) return;
+        const { state: serverState } = await r.json();
+        if (!serverState) return;
+
+        const localS = studyStateRef.current;
+        const realToday = todayStr();
+
+        // Sunucu eski tarih döndürdüyse — gün geçmiş, sıfırla
+        if (serverState.today_date && serverState.today_date !== realToday) return;
+
+        // Aynı gün — sunucu daha güncelse SUNUCUYA UY
+        // (öteki cihazda çalışmaya devam edilmiş olabilir)
+        const serverNewer = serverState.updated_at && (serverState.updated_at > (localS as any)._lastSync || 0);
+        const phaseDiffers = serverState.phase !== localS.phase;
+        const totalDiffers = Math.abs((serverState.today_total_seconds || 0) - localS.todayTotalSeconds) > 5;
+        
+        if (phaseDiffers || totalDiffers) {
+          // Yerel kullanıcının aktif inputu daha yeni olabilir — son 5 sn'de buton bastıysa override etme
+          const localActedRecently = localS.phaseStartedAt && (Date.now() - localS.phaseStartedAt < 5000);
+          if (localActedRecently && !phaseDiffers) return;
+
+          setStudyState(s => ({
+            ...s,
+            phase: (serverState.phase as any) || s.phase,
+            mode: (serverState.mode as any) || s.mode,
+            phaseStartedAt: serverState.phase_started_at || 0,
+            accumulatedInPhase: serverState.accumulated_in_phase || 0,
+            completedWorkBlocks: serverState.completed_blocks || 0,
+            todayTotalSeconds: serverState.today_total_seconds || 0,
+            todayDate: serverState.today_date || s.todayDate,
+            _lastSync: Date.now(),
+          } as any));
+        }
+      } catch {}
+    };
+
+    // İlk sync hemen
+    syncFromServer();
+    // Sonra periyodik
+    const id = setInterval(syncFromServer, 10000);
+    return () => clearInterval(id);
+  }, [mode, user]);
+
   // 30 sn'de bir heartbeat — aktif çalışma varsa
   useEffect(() => {
     const hb = setInterval(() => {
@@ -2867,11 +2921,8 @@ export default function App() {
       tempCanvas.height = pxHeight;
       if (ctx) {
         ctx.drawImage(canvas, pxLeft, pxTop, pxWidth, pxHeight, 0, 0, pxWidth, pxHeight);
-        ctx.strokeStyle = 'rgba(34,197,94,0.85)';
-        ctx.lineWidth   = Math.max(3, pxWidth * 0.008);
-        ctx.setLineDash([pxWidth * 0.04, pxWidth * 0.02]);
-        ctx.strokeRect(ctx.lineWidth / 2, ctx.lineWidth / 2, pxWidth - ctx.lineWidth, pxHeight - ctx.lineWidth);
-        ctx.setLineDash([]);
+        // Yeşil dashed border kaldırıldı — sadece PDF okurken overlay olarak çizilir,
+        // kaydedilen resim ve üretilen PDF'lerde görünmez
       }
       const dataUrl = tempCanvas.toDataURL('image/jpeg', 0.92);
       setNoteImage(dataUrl);
@@ -8107,39 +8158,58 @@ export default function App() {
               const goalH = goalSec / 3600;
               return (
                 <div>
-                  {/* Üst özet */}
-                  <div className="grid grid-cols-3 gap-2 mb-3">
-                    <div className="bg-slate-900/40 rounded-lg p-2 text-center">
-                      <div className="text-[9px] text-slate-500">Toplam</div>
-                      <div className="text-sm font-bold text-blue-400">{formatHMS(weekTotal)}</div>
-                    </div>
-                    <div className="bg-slate-900/40 rounded-lg p-2 text-center">
-                      <div className="text-[9px] text-slate-500">Ortalama</div>
-                      <div className="text-sm font-bold text-violet-400">{formatHMS(weekAvg)}/gün</div>
-                    </div>
-                    <div className="bg-slate-900/40 rounded-lg p-2 text-center">
-                      <div className="text-[9px] text-slate-500">Hedefli gün</div>
-                      <div className="text-sm font-bold text-emerald-400">
-                        {last7.filter(d => d.totalSeconds >= goalSec).length}/7
+                  {/* Üst özet — 3 zengin metrik */}
+                  {(() => {
+                    const goaledDays = last7.filter(d => d.totalSeconds >= goalSec).length;
+                    const fillPct = goalSec > 0 ? Math.round((weekTotal / (goalSec * 7)) * 100) : 0;
+                    const bestDay = [...last7].sort((a, b) => b.totalSeconds - a.totalSeconds)[0];
+                    const bestDayLabel = bestDay && bestDay.totalSeconds > 0 ? bestDay.dayLabel : '-';
+                    return (
+                      <div className="grid grid-cols-3 gap-2 mb-3">
+                        <div className="bg-gradient-to-br from-emerald-950/40 to-slate-900/40 border border-emerald-700/20 rounded-lg p-2 text-center">
+                          <div className="text-[9px] text-emerald-300">🎯 Hedef Doluluk</div>
+                          <div className={`text-lg font-bold ${fillPct >= 100 ? 'text-emerald-400' : fillPct >= 70 ? 'text-blue-400' : fillPct >= 30 ? 'text-amber-400' : 'text-rose-400'}`}>
+                            %{fillPct}
+                          </div>
+                          <div className="text-[8px] text-slate-500">{goaledDays}/7 gün ✓</div>
+                        </div>
+                        <div className="bg-gradient-to-br from-violet-950/40 to-slate-900/40 border border-violet-700/20 rounded-lg p-2 text-center">
+                          <div className="text-[9px] text-violet-300">📈 Ortalama</div>
+                          <div className="text-lg font-bold text-violet-400">{formatHMS(weekAvg)}</div>
+                          <div className="text-[8px] text-slate-500">/gün</div>
+                        </div>
+                        <div className="bg-gradient-to-br from-blue-950/40 to-slate-900/40 border border-blue-700/20 rounded-lg p-2 text-center">
+                          <div className="text-[9px] text-blue-300">🏆 En İyi</div>
+                          <div className="text-base font-bold text-blue-400">{bestDay && bestDay.totalSeconds > 0 ? formatHMS(bestDay.totalSeconds) : '-'}</div>
+                          <div className="text-[8px] text-slate-500">{bestDayLabel}</div>
+                        </div>
                       </div>
-                    </div>
-                  </div>
+                    );
+                  })()}
 
                   {/* Bar chart with goal line */}
                   <div className="relative">
-                    {/* Hedef çizgisi */}
-                    {maxDaySec > 0 && goalSec <= maxDaySec && (
-                      <div
-                        className="absolute left-0 right-0 border-t-2 border-dashed border-emerald-500/40 pointer-events-none flex items-center justify-end pr-1"
-                        style={{ bottom: `${(goalSec / maxDaySec) * 100}%` }}
-                      >
-                        <span className="text-[8px] text-emerald-400/80 bg-slate-900/80 px-1 rounded">{Math.floor(goalH)}s hedef</span>
-                      </div>
-                    )}
                     <div className="flex items-end justify-between gap-2 h-32 relative">
+                      {/* Hedef çizgisi — chart kapsayıcısı içinde */}
+                      {(() => {
+                        const chartMax = Math.max(goalSec, maxDaySec, 1);
+                        const goalPos = (goalSec / chartMax) * 100;
+                        if (goalPos > 95) return null; // tepe çok yakınsa gizle
+                        return (
+                          <div
+                            className="absolute left-0 right-0 border-t-2 border-dashed border-emerald-500/60 pointer-events-none flex items-center justify-end pr-1 z-10"
+                            style={{ bottom: `${goalPos}%` }}
+                          >
+                            <span className="text-[9px] text-emerald-300 bg-slate-900/90 px-1.5 py-0.5 rounded font-bold">
+                              🎯 {Math.floor(goalSec/3600)}s{goalSec%3600 ? ` ${Math.floor((goalSec%3600)/60)}d` : ''}
+                            </span>
+                          </div>
+                        );
+                      })()}
                       {last7.map((d, i) => {
+                        const chartMax = Math.max(goalSec, maxDaySec, 1);
                         const hitGoal = d.totalSeconds >= goalSec;
-                        const heightPct = maxDaySec > 0 ? (d.totalSeconds / maxDaySec) * 100 : 0;
+                        const heightPct = (d.totalSeconds / chartMax) * 100;
                         const isToday = i === 6;
                         return (
                           <div key={d.date} className="flex-1 flex flex-col items-center gap-0.5 group">

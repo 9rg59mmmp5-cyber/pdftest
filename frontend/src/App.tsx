@@ -6327,7 +6327,7 @@ export default function App() {
           doc.setFontSize(7);
           doc.setFont('helvetica', 'bold');
           doc.setTextColor(30, 41, 59);
-          doc.text(note.title!.substring(0, Math.floor(colW * 2.2)), x + 2, contentY + 3.5);
+          doc.text(String(note.title || '').substring(0, Math.floor(colW * 2.2)), x + 2, contentY + 3.5);
           contentY += 6;
         }
 
@@ -6345,9 +6345,10 @@ export default function App() {
           doc.setFont('helvetica', 'normal');
           doc.setTextColor(100, 116, 139);
           const parts: string[] = [];
-          if (note.topic) parts.push(note.topic);
-          if (note.pdfName) parts.push(`${note.pdfName}${note.page ? ` S.${note.page}` : ''}`);
-          doc.text(parts.join('  ').substring(0, Math.floor(colW * 3.5)), x + 2, contentY + 3);
+          if (note.topic) parts.push(String(note.topic));
+          if (note.pdfName) parts.push(`${String(note.pdfName)}${note.page ? ` S.${note.page}` : ''}`);
+          const txt = parts.join('  ').substring(0, Math.floor(colW * 3.5));
+          if (txt) doc.text(txt, x + 2, contentY + 3);
         }
 
         colY[col] += cardH + gap;
@@ -6727,8 +6728,8 @@ export default function App() {
       // Etiket
       doc.setFontSize(6);
       doc.setTextColor(100, 100, 100);
-      const label = `${note.subject}${note.topic ? ' › ' + note.topic : ''}${note.title ? ' — ' + note.title : ''}`;
-      doc.text(label, x, y + imgH + 3.5, { maxWidth: colW });
+      const label = `${note.subject || ''}${note.topic ? ' › ' + note.topic : ''}${note.title ? ' — ' + note.title : ''}`;
+      doc.text(String(label || 'Not'), x, y + imgH + 3.5, { maxWidth: colW });
 
       col++;
       if (col >= COLS) {
@@ -6794,7 +6795,7 @@ export default function App() {
         doc.setFillColor(20, 83, 45);
         doc.roundedRect(M, y, W - M * 2, 8, 2, 2, 'F');
         doc.setTextColor(134, 239, 172); doc.setFontSize(10); doc.setFont('helvetica', 'bold');
-        doc.text(note.subject, M + 4, y + 5.5);
+        doc.text(String(note.subject || 'Genel'), M + 4, y + 5.5);
         y += 11;
       }
 
@@ -6815,7 +6816,7 @@ export default function App() {
             doc.setFillColor(20, 83, 45);
             doc.roundedRect(M, M, W - M * 2, 8, 2, 2, 'F');
             doc.setTextColor(134, 239, 172); doc.setFontSize(10); doc.setFont('helvetica', 'bold');
-            doc.text(lastSubject, M + 4, M + 5.5);
+            doc.text(String(lastSubject || ''), M + 4, M + 5.5);
             y = M + 11;
           } else { y = M; }
         } else { y = M; }
@@ -6827,7 +6828,7 @@ export default function App() {
 
       if (note.title) {
         doc.setFontSize(7); doc.setFont('helvetica', 'bold'); doc.setTextColor(226, 232, 240);
-        doc.text(note.title.substring(0, 38), x + 2.5, y + 5);
+        doc.text(String(note.title).substring(0, 38), x + 2.5, y + 5);
       }
       const imgY = y + (note.title ? 7 : 2.5);
       doc.setFillColor(255, 255, 255);
@@ -6835,7 +6836,7 @@ export default function App() {
       try { doc.addImage(img, 'JPEG', x + 2 + (colW - 4 - iw) / 2, imgY, iw, ih); } catch {}
       if (showSource && note.pdfName) {
         doc.setFontSize(5.5); doc.setFont('helvetica', 'normal'); doc.setTextColor(100, 116, 139);
-        doc.text(`📄 ${note.pdfName}${note.page ? ` S.${note.page}` : ''}`.substring(0, 48), x + 2, y + cardH - 1.5);
+        doc.text(`📄 ${String(note.pdfName)}${note.page ? ` S.${note.page}` : ''}`.substring(0, 48), x + 2, y + cardH - 1.5);
       }
       y += cardH + 3;
     }

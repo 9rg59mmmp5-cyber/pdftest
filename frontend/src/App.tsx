@@ -89,6 +89,7 @@ interface StudySession {
   breaks: number;
   mode: StudyMode;
   timeline: Array<{ start: number; end: number; type: 'work' | 'break' }>; // Saat timestamp
+  goalMinutes?: number; // O güne özel hedef (varsa). 0/undefined ise varsayılan goal kullan
 }
 
 interface StudyState {
@@ -1259,6 +1260,7 @@ export default function App() {
           setStudyHistory(daily.map((d: any) => ({
             date: d.date,
             totalSeconds: d.total_seconds,
+              goalMinutes: d.goal_minutes || 0,
             workBlocks: d.completed_blocks,
             breaks: 0,
             mode: d.mode,
@@ -1305,6 +1307,7 @@ export default function App() {
             setStudyHistory(daily.map((d: any) => ({
               date: d.date,
               totalSeconds: d.total_seconds,
+              goalMinutes: d.goal_minutes || 0,
               workBlocks: d.completed_blocks,
               breaks: 0,
               mode: d.mode,
@@ -1921,6 +1924,8 @@ export default function App() {
   const [sessionsLoading, setSessionsLoading] = useState<boolean>(false);
   const [editingDailyMinutes, setEditingDailyMinutes] = useState<string>('');
   const [showEditDaily, setShowEditDaily] = useState<boolean>(false);
+  const [editingDailyGoalMinutes, setEditingDailyGoalMinutes] = useState<string>('');
+  const [showEditDailyGoal, setShowEditDailyGoal] = useState<boolean>(false);
   const [pageGoalInput, setPageGoalInput] = useState<string>('');
   // FIX: Not kategorisi seçimi (not kesme modalında)
   const [noteCropCategory, setNoteCropCategory] = useState<'onemli' | 'ornek' | 'tanim' | 'formul' | 'diger'>('onemli');
@@ -6432,6 +6437,42 @@ export default function App() {
 
             {!sessionsLoading && events.length > 0 && (
               <>
+                {/* O günün hedefi vs gerçekleşen */}
+                {(() => {
+                  const dayRec = studyHistory.find(h => h.date === sessionsModalDate);
+                  const dayGoalMin = (dayRec?.goalMinutes && dayRec.goalMinutes > 0) ? dayRec.goalMinutes : studyGoalMinutes;
+                  const dayGoalSec = dayGoalMin * 60;
+                  const isCustom = dayRec?.goalMinutes && dayRec.goalMinutes > 0;
+                  const pct = dayGoalSec > 0 ? Math.round((totalWork / dayGoalSec) * 100) : 0;
+                  return (
+                    <div className={`rounded-xl p-3 mb-3 border ${
+                      isCustom ? 'bg-violet-950/25 border-violet-700/40' : 'bg-blue-950/20 border-blue-700/30'
+                    }`}>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="text-[10px] font-bold flex items-center gap-1">
+                          <span className={isCustom ? 'text-violet-300' : 'text-blue-300'}>
+                            🎯 Bu Günkü Hedef
+                          </span>
+                          {isCustom && <span className="text-[9px] text-violet-400 bg-violet-900/40 px-1.5 py-0.5 rounded">özel</span>}
+                        </div>
+                        <div className="text-[10px] text-slate-400">{fmtDur(totalWork)} / {fmtDur(dayGoalSec)}</div>
+                      </div>
+                      <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full transition-all ${
+                            pct >= 100 ? 'bg-gradient-to-r from-emerald-500 to-emerald-400' :
+                            pct >= 70 ? 'bg-gradient-to-r from-blue-500 to-blue-400' :
+                            pct >= 30 ? 'bg-gradient-to-r from-amber-500 to-amber-400' :
+                            'bg-gradient-to-r from-rose-500 to-rose-400'
+                          }`}
+                          style={{ width: `${Math.min(100, pct)}%` }}
+                        />
+                      </div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">%{pct} {pct >= 100 ? '✓' : ''}</div>
+                    </div>
+                  );
+                })()}
+
                 {/* Özet — 4 metrik */}
                 <div className="grid grid-cols-2 gap-2 mb-3">
                   <div className="bg-emerald-950/30 border border-emerald-700/30 rounded-xl p-2.5">
@@ -6564,15 +6605,74 @@ export default function App() {
                   💡 Örnek: 180 → 3 saat, 90 → 1.5 saat. Mevcut: {Math.floor((studyHistory.find(h => h.date === sessionsModalDate)?.totalSeconds || 0) / 60)} dk
                 </div>
               </div>
+            ) : showEditDailyGoal ? (
+              <div className="bg-violet-950/40 border border-violet-700/40 rounded-lg p-2.5">
+                <div className="text-[10px] text-violet-300 font-bold mb-1.5">🎯 O Günkü Hedefi Belirle</div>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 relative">
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={1440}
+                      value={editingDailyGoalMinutes}
+                      onChange={e => setEditingDailyGoalMinutes(e.target.value.replace(/[^0-9]/g, ''))}
+                      placeholder="Dakika (0=varsayılan)"
+                      className="w-full bg-slate-900 border border-violet-700/40 rounded-lg pl-3 pr-12 py-2 text-sm text-white focus:outline-none focus:border-violet-500"
+                      autoFocus
+                    />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] text-slate-500">dakika</span>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      const minutes = parseInt(editingDailyGoalMinutes) || 0;
+                      try {
+                        const token = await user!.getIdToken();
+                        const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+                        await fetch(`${BASE}/study/set-daily`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                          body: JSON.stringify({ date: sessionsModalDate, goal_minutes: minutes }),
+                        });
+                        setStudyHistory(prev => {
+                          const exists = prev.find(h => h.date === sessionsModalDate);
+                          if (exists) return prev.map(h => h.date === sessionsModalDate ? { ...h, goalMinutes: minutes } : h);
+                          return [...prev, { date: sessionsModalDate, totalSeconds: 0, workBlocks: 0, breaks: 0, mode: 'deepwork', timeline: [], goalMinutes: minutes }];
+                        });
+                        setShowEditDailyGoal(false);
+                        setEditingDailyGoalMinutes('');
+                      } catch {}
+                    }}
+                    className="bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold px-4 py-2 rounded-lg"
+                  >Kaydet</button>
+                  <button
+                    onClick={() => { setShowEditDailyGoal(false); setEditingDailyGoalMinutes(''); }}
+                    className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-3 py-2 rounded-lg"
+                  >İptal</button>
+                </div>
+                <div className="text-[9px] text-slate-500 mt-1.5">
+                  💡 0 girersen varsayılan günlük hedef (şu an {Math.floor(studyGoalMinutes/60)}s {studyGoalMinutes%60}dk) kullanılır
+                </div>
+              </div>
             ) : (
-              <button
-                onClick={() => {
-                  const current = Math.floor((studyHistory.find(h => h.date === sessionsModalDate)?.totalSeconds || 0) / 60);
-                  setEditingDailyMinutes(String(current));
-                  setShowEditDaily(true);
-                }}
-                className="w-full bg-amber-700 hover:bg-amber-600 text-white text-xs font-bold py-2 rounded-lg"
-              >✏️ Toplam Süreyi Düzelt (dakika)</button>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => {
+                    const current = Math.floor((studyHistory.find(h => h.date === sessionsModalDate)?.totalSeconds || 0) / 60);
+                    setEditingDailyMinutes(String(current));
+                    setShowEditDaily(true);
+                  }}
+                  className="bg-amber-700 hover:bg-amber-600 text-white text-xs font-bold py-2 rounded-lg"
+                >✏️ Süreyi Düzelt</button>
+                <button
+                  onClick={() => {
+                    const rec = studyHistory.find(h => h.date === sessionsModalDate);
+                    setEditingDailyGoalMinutes(String(rec?.goalMinutes || ''));
+                    setShowEditDailyGoal(true);
+                  }}
+                  className="bg-violet-700 hover:bg-violet-600 text-white text-xs font-bold py-2 rounded-lg"
+                >🎯 Hedef Düzelt</button>
+              </div>
             )}
             <button
               onClick={async () => {
@@ -8579,14 +8679,17 @@ export default function App() {
       const d = new Date();
       d.setDate(d.getDate() - (6 - i));
       const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      const histRec = studyHistory.find(h => h.date === key);
       const rec = key === todayKey
-        ? { date: key, totalSeconds: liveTotal }
-        : studyHistory.find(h => h.date === key) || { date: key, totalSeconds: 0 };
-      return { ...rec, dayLabel: ['Pzt','Sal','Çar','Per','Cum','Cmt','Paz'][(d.getDay() + 6) % 7] };
+        ? { date: key, totalSeconds: liveTotal, goalMinutes: histRec?.goalMinutes || 0 }
+        : histRec || { date: key, totalSeconds: 0, goalMinutes: 0 };
+      // Bu güne özel hedef varsa onu, yoksa varsayılan goalSec'i kullan
+      const dayGoalSec = (rec.goalMinutes && rec.goalMinutes > 0) ? rec.goalMinutes * 60 : goalSec;
+      return { ...rec, dayGoalSec, dayLabel: ['Pzt','Sal','Çar','Per','Cum','Cmt','Paz'][(d.getDay() + 6) % 7] };
     });
     const weekTotal = last7.reduce((s, d) => s + d.totalSeconds, 0);
     const weekAvg = Math.floor(weekTotal / 7);
-    const maxDaySec = Math.max(goalSec, ...last7.map(d => d.totalSeconds));
+    const maxDaySec = Math.max(goalSec, ...last7.map(d => Math.max(d.dayGoalSec, d.totalSeconds)));
 
     // Streak
     const computeStreak = () => {
@@ -8871,35 +8974,22 @@ export default function App() {
                     );
                   })()}
 
-                  {/* Bar chart with goal line */}
+                  {/* Bar chart — her bar'ın kendi günlük hedefi */}
                   <div className="relative">
                     <div className="flex items-stretch justify-between gap-2 h-40 relative">
-                      {/* Hedef çizgisi — chart kapsayıcısı içinde */}
-                      {(() => {
-                        const chartMax = Math.max(goalSec, maxDaySec, 1);
-                        const goalPos = (goalSec / chartMax) * 100;
-                        if (goalPos > 95) return null;
-                        return (
-                          <div
-                            className="absolute left-0 right-0 border-t-2 border-dashed border-emerald-500/70 pointer-events-none flex items-center justify-end pr-1 z-10"
-                            style={{ bottom: `${goalPos}%`, height: 0 }}
-                          >
-                            <span className="text-[9px] text-emerald-300 bg-slate-900 px-1.5 py-0.5 rounded font-bold whitespace-nowrap -translate-y-2">
-                              🎯 Hedef {Math.floor(goalSec/3600)}s{goalSec%3600 ? ` ${Math.floor((goalSec%3600)/60)}d` : ''}
-                            </span>
-                          </div>
-                        );
-                      })()}
                       {last7.map((d, i) => {
                         const chartMax = Math.max(goalSec, maxDaySec, 1);
-                        const hitGoal = d.totalSeconds >= goalSec;
+                        const dayGoal = d.dayGoalSec;
+                        const hitGoal = d.totalSeconds >= dayGoal;
                         const heightPct = (d.totalSeconds / chartMax) * 100;
+                        const goalPct = (dayGoal / chartMax) * 100;
                         const isToday = i === 6;
+                        const isCustomGoal = d.goalMinutes && d.goalMinutes > 0;
                         return (
                           <button
                             key={d.date}
                             onClick={() => openSessionsModal(d.date)}
-                            className="flex-1 flex flex-col items-center gap-0.5 group cursor-pointer focus:outline-none h-full"
+                            className="flex-1 flex flex-col items-center gap-0.5 group cursor-pointer focus:outline-none h-full relative"
                           >
                             {/* Saat etiketi - barın üstünde */}
                             <div className="text-[9px] font-bold h-3 flex items-end" style={{ color: d.totalSeconds > 0 ? '#cbd5e1' : 'transparent' }}>
@@ -8909,16 +8999,26 @@ export default function App() {
                             </div>
                             {/* Bar alanı */}
                             <div className="flex-1 w-full flex flex-col justify-end relative min-h-0">
+                              {/* Günlük hedef tireli çizgisi — bar'ın üzerinde */}
+                              {goalPct > 5 && goalPct < 98 && (
+                                <div
+                                  className={`absolute left-0 right-0 border-t-[1.5px] border-dashed pointer-events-none z-10 ${
+                                    isCustomGoal ? 'border-violet-400/80' : 'border-emerald-400/60'
+                                  }`}
+                                  style={{ bottom: `${goalPct}%` }}
+                                  title={`Hedef: ${Math.floor(dayGoal/3600)}s ${Math.floor((dayGoal%3600)/60)}dk${isCustomGoal ? ' (özel)' : ''}`}
+                                />
+                              )}
                               <div
                                 className={`w-full rounded-t-md transition-all ${
                                   hitGoal ? 'bg-gradient-to-t from-emerald-600 to-emerald-400' :
-                                  d.totalSeconds > goalSec * 0.7 ? 'bg-gradient-to-t from-blue-600 to-blue-400' :
-                                  d.totalSeconds > goalSec * 0.3 ? 'bg-gradient-to-t from-amber-600 to-amber-400' :
+                                  d.totalSeconds > dayGoal * 0.7 ? 'bg-gradient-to-t from-blue-600 to-blue-400' :
+                                  d.totalSeconds > dayGoal * 0.3 ? 'bg-gradient-to-t from-amber-600 to-amber-400' :
                                   d.totalSeconds > 0 ? 'bg-gradient-to-t from-rose-600 to-rose-400' : 
                                   'bg-slate-700/40'
                                 } ${isToday ? 'ring-2 ring-white/30' : ''} group-hover:opacity-80`}
                                 style={{ height: `${Math.max(d.totalSeconds > 0 ? 8 : 2, heightPct)}%` }}
-                                title={`${d.dayLabel}: ${formatHMS(d.totalSeconds)} — tıkla detay`}
+                                title={`${d.dayLabel}: ${formatHMS(d.totalSeconds)} / ${Math.floor(dayGoal/3600)}s ${Math.floor((dayGoal%3600)/60)}dk hedef — tıkla detay`}
                               />
                             </div>
                             <div className={`text-[10px] font-medium ${isToday ? 'text-white' : 'text-slate-400'}`}>{d.dayLabel}</div>
@@ -8934,6 +9034,10 @@ export default function App() {
                     <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-sm" /> %70+</span>
                     <span className="flex items-center gap-1"><span className="w-2 h-2 bg-amber-500 rounded-sm" /> %30+</span>
                     <span className="flex items-center gap-1"><span className="w-2 h-2 bg-rose-500 rounded-sm" /> Az</span>
+                    <span className="flex items-center gap-1 ml-2">
+                      <span className="w-3 border-t-[1.5px] border-dashed border-violet-400" /> 
+                      <span className="text-violet-300">Özel hedef</span>
+                    </span>
                   </div>
                 </div>
               );
@@ -9139,6 +9243,7 @@ export default function App() {
                           if (Array.isArray(daily)) {
                             setStudyHistory(daily.map((d: any) => ({
                               date: d.date, totalSeconds: d.total_seconds,
+              goalMinutes: d.goal_minutes || 0,
                               workBlocks: d.completed_blocks, breaks: 0, mode: d.mode, timeline: [],
                             })));
                           }

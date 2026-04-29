@@ -537,7 +537,7 @@ app.get('/pdftest/api/study/daily', requireAuth, (req, res) => {
   try {
     const days = Math.min(365, Math.max(1, parseInt(req.query.days) || 30));
     const rows = db.prepare(
-      'SELECT date, total_seconds, completed_blocks, mode FROM study_daily WHERE uid=? ORDER BY date DESC LIMIT ?'
+      'SELECT date, total_seconds, completed_blocks, mode, goal_minutes FROM study_daily WHERE uid=? ORDER BY date DESC LIMIT ?'
     ).all(req.uid, days);
     res.json({ daily: rows });
   } catch (e) { res.status(500).json({ error: String(e) }); }
@@ -683,15 +683,22 @@ app.post('/pdftest/api/study/delete-event', requireAuth, (req, res) => {
 app.post('/pdftest/api/study/set-daily', requireAuth, (req, res) => {
   try {
     const uid = req.uid;
-    const { date, total_seconds } = req.body || {};
-    if (!date || typeof total_seconds !== 'number') {
-      return res.status(400).json({ error: 'date ve total_seconds gerekli' });
-    }
+    const { date, total_seconds, goal_minutes } = req.body || {};
+    if (!date) return res.status(400).json({ error: 'date gerekli' });
     const existing = db.prepare('SELECT 1 FROM study_daily WHERE uid=? AND date=?').get(uid, date);
     if (existing) {
-      db.prepare('UPDATE study_daily SET total_seconds=?, last_ts=? WHERE uid=? AND date=?').run(total_seconds, Date.now(), uid, date);
+      // Sadece sağlanan alanları güncelle
+      if (typeof total_seconds === 'number' && typeof goal_minutes === 'number') {
+        db.prepare('UPDATE study_daily SET total_seconds=?, goal_minutes=?, last_ts=? WHERE uid=? AND date=?').run(total_seconds, goal_minutes, Date.now(), uid, date);
+      } else if (typeof total_seconds === 'number') {
+        db.prepare('UPDATE study_daily SET total_seconds=?, last_ts=? WHERE uid=? AND date=?').run(total_seconds, Date.now(), uid, date);
+      } else if (typeof goal_minutes === 'number') {
+        db.prepare('UPDATE study_daily SET goal_minutes=?, last_ts=? WHERE uid=? AND date=?').run(goal_minutes, Date.now(), uid, date);
+      }
     } else {
-      db.prepare('INSERT INTO study_daily (uid, date, total_seconds, completed_blocks, mode, first_ts, last_ts) VALUES (?, ?, ?, 0, ?, ?, ?)').run(uid, date, total_seconds, 'deepwork', Date.now(), Date.now());
+      db.prepare('INSERT INTO study_daily (uid, date, total_seconds, completed_blocks, mode, first_ts, last_ts, goal_minutes) VALUES (?, ?, ?, 0, ?, ?, ?, ?)').run(
+        uid, date, total_seconds || 0, 'deepwork', Date.now(), Date.now(), goal_minutes || 0
+      );
     }
     res.json({ ok: true });
   } catch (e) {

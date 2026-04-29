@@ -1365,6 +1365,7 @@ export default function App() {
             todayTotalSeconds: serverState.today_total_seconds || 0,
             todayDate: serverState.today_date || s.todayDate,
             _lastUpdate: Date.now(),
+            _isFromSync: true, // Auto-transition'ın bunu trigger etmemesi için
           } as any));
         }
       } catch {}
@@ -1548,6 +1549,11 @@ export default function App() {
 
   // Mola başlat
   const startStudyBreak = (long: boolean = false) => {
+    // Guard: zaten break/idle ise tekrar break başlatma (cihazlar arası sync race condition önleme)
+    if (studyStateRef.current.phase === 'break' || studyStateRef.current.phase === 'idle') {
+      console.log('[startStudyBreak] zaten break/idle, atlanıyor');
+      return;
+    }
     const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
     setStudyState(s => {
       const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
@@ -1571,6 +1577,10 @@ export default function App() {
 
   // Çalışmayı devam et (mola bitti)
   const resumeStudyWork = () => {
+    if (studyStateRef.current.phase === 'working') {
+      console.log('[resumeStudyWork] zaten working, atlanıyor');
+      return;
+    }
     const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
     setStudyState(s => ({
       ...s,
@@ -1651,6 +1661,20 @@ export default function App() {
   // Browser arka planda olsa bile setTimeout büyük ihtimalle çalışır
   useEffect(() => {
     if (studyState.phase === 'idle' || studyState.phase === 'paused') return;
+    
+    // ⚠️ ÖNEMLİ: Eğer state polling'den geldiyse (öteki cihaz değişikliği), 
+    // bu cihaz transition tetiklemesin. Sadece birincil cihaz transition yapar.
+    // _isFromSync flag ile işaretlenir, ilk transition kontrolünden sonra temizleriz.
+    if ((studyState as any)._isFromSync) {
+      // Flag'i temizle ki bir sonraki LOCAL change'de transition olsun
+      setStudyState(s => {
+        const ns = { ...s };
+        delete (ns as any)._isFromSync;
+        return ns;
+      });
+      return;
+    }
+    
     const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
     if (studyState.phase === 'working' && preset.id === 'flexible') return;
 
@@ -1679,12 +1703,19 @@ export default function App() {
     }
 
     // Hedef zamanda tetikle
+    const initialPhase = studyState.phase;
+    const initialPhaseStartedAt = studyState.phaseStartedAt;
     const timer = setTimeout(() => {
-      if (studyStateRef.current.phase === 'working') {
-        const nextBlockNumber = studyStateRef.current.completedWorkBlocks + 1;
+      // Tekrar doğrula — bu süre içinde sync ile başka bir şeye geçilmiş olabilir
+      const cur = studyStateRef.current;
+      if (cur.phase !== initialPhase || cur.phaseStartedAt !== initialPhaseStartedAt) {
+        return; // State değişmiş, transition iptal
+      }
+      if (cur.phase === 'working') {
+        const nextBlockNumber = cur.completedWorkBlocks + 1;
         const isLongBreak = nextBlockNumber % preset.longBreakEvery === 0;
         startStudyBreak(isLongBreak);
-      } else if (studyStateRef.current.phase === 'break') {
+      } else if (cur.phase === 'break') {
         sendStudyNotif('🔔 Mola bitti!', 'Tekrar çalışmaya başlayabilirsin.');
         setStudyState(s => ({ ...s, phase: 'idle' }));
       }

@@ -1099,6 +1099,10 @@ export default function App() {
   // ═══════════════════════════════════════════════════════════════════════
   const studyEventQueueRef = useRef<any[]>([]);
   const studyInitialRestoreDone = useRef(false);
+  // Auto-transition lock — sync'ten gelen state için lock'lu, kullanıcı tarafından açılır
+  const studyTransitionLockRef = useRef<boolean>(false);
+  // Son local action timestamp — bu cihaz sahibi mi? (sahip ise transition tetikleyebilir)
+  const studyLastLocalActionRef = useRef<number>(0);
 
   // Offline queue'yu localforage'dan yükle
   useEffect(() => {
@@ -1200,6 +1204,9 @@ export default function App() {
     try {
       const token = await user.getIdToken();
       const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+      
+      // Not: Otomatik recompute kaldırıldı — manuel düzeltmeleri ezmemesi için
+      
       const r = await fetch(`${BASE}/study/state`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -1271,6 +1278,14 @@ export default function App() {
             mode: d.mode,
             timeline: [],
           })));
+          
+          // 🎯 ÖNEMLİ: Bugünkü daily kaydı, study_state'in today_total_seconds'undan
+          // daha güvenilir (manuel düzeltmeler daily'e yazılır). State'i daily'le override et.
+          const realToday = todayStr();
+          const todayDaily = daily.find((d: any) => d.date === realToday);
+          if (todayDaily && typeof todayDaily.total_seconds === 'number') {
+            setStudyState(s => ({ ...s, todayTotalSeconds: todayDaily.total_seconds }));
+          }
         }
       }
 
@@ -1325,7 +1340,9 @@ export default function App() {
   }, [mode, user]);
 
   // ⚡ Cihazlar arası senkronizasyon — her 10 sn sunucudan state çek
-  // Çalışma sayfası açıkken aktif. Öteki cihazda değişmişse hemen yansıt.
+  // KURAL: polling SADECE state'i okur, asla transition tetiklemez.
+  // Eğer bu cihaz son 30 sn içinde aktif aksiyon yaptıysa (sahip cihaz),
+  // sunucudan gelen değeri override etmez. Aksi halde sunucuya tabidir.
   useEffect(() => {
     if (mode !== 'calisma' || !user) return;
     const syncFromServer = async () => {
@@ -1345,16 +1362,29 @@ export default function App() {
         // Sunucu eski tarih döndürdüyse — gün geçmiş, sıfırla
         if (serverState.today_date && serverState.today_date !== realToday) return;
 
-        // Aynı gün — sunucu daha güncelse SUNUCUYA UY
-        // (öteki cihazda çalışmaya devam edilmiş olabilir)
-        const localUpdatedAt = (localS as any)._lastUpdate || 0;
-        const serverUpdatedAt = serverState.updated_at || 0;
-        const serverIsNewer = serverUpdatedAt > localUpdatedAt + 5000; // 5sn buffer
-        const phaseDiffers = serverState.phase !== localS.phase;
-        const totalDiffers = Math.abs((serverState.today_total_seconds || 0) - localS.todayTotalSeconds) > 30;
+        // 🎯 v25: Sunucu artık event'lerden hesaplıyor — total her zaman doğru.
+        // Sunucudan gelen today_total_seconds'a HEP güveniyoruz.
+        // Phase/phaseStartedAt için sahip cihaz öncelikli (kendi local state'i daha güncel).
+        const recentLocalAction = Date.now() - studyLastLocalActionRef.current < 30000;
+        const serverTotal = serverState.today_total_seconds || 0;
+        const totalDiffers = Math.abs(serverTotal - localS.todayTotalSeconds) > 5;
         
-        // Sadece gerçekten anlamlı bir fark varsa ve sunucu daha yeniyse senkron
-        if ((phaseDiffers || totalDiffers) && (serverIsNewer || phaseDiffers)) {
+        if (recentLocalAction) {
+          // Sahip cihaz — sadece total'i güncelle (sunucu doğru), phase'e dokunma
+          if (totalDiffers) {
+            setStudyState(s => ({
+              ...s,
+              todayTotalSeconds: serverTotal,
+            }));
+          }
+          return;
+        }
+
+        // Yabancı cihaz — phase ve total'i kabul et, AMA transition tetiklenmesin
+        const phaseDiffers = serverState.phase !== localS.phase;
+        
+        if (phaseDiffers || totalDiffers) {
+          studyTransitionLockRef.current = true;
           setStudyState(s => ({
             ...s,
             phase: (serverState.phase as any) || s.phase,
@@ -1362,12 +1392,34 @@ export default function App() {
             phaseStartedAt: serverState.phase_started_at || 0,
             accumulatedInPhase: serverState.accumulated_in_phase || 0,
             completedWorkBlocks: serverState.completed_blocks || 0,
-            todayTotalSeconds: serverState.today_total_seconds || 0,
+            todayTotalSeconds: serverTotal,
             todayDate: serverState.today_date || s.todayDate,
-            _lastUpdate: Date.now(),
-            _isFromSync: true, // Auto-transition'ın bunu trigger etmemesi için
-          } as any));
+          }));
+          setTimeout(() => { studyTransitionLockRef.current = false; }, 200);
         }
+      } catch {}
+    };
+
+    // 🎯 Daily history'i de periyodik çek — modal ve barların aynı kaynağı kullanması için
+    const syncDailyFromServer = async () => {
+      try {
+        const token = await user.getIdToken();
+        const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+        const r = await fetch(`${BASE}/study/daily?days=30`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!r.ok) return;
+        const { daily } = await r.json();
+        if (!Array.isArray(daily)) return;
+        setStudyHistory(daily.map((d: any) => ({
+          date: d.date,
+          totalSeconds: d.total_seconds,
+          goalMinutes: d.goal_minutes || 0,
+          workBlocks: d.completed_blocks,
+          breaks: 0,
+          mode: d.mode,
+          timeline: [],
+        })));
       } catch {}
     };
 
@@ -1375,7 +1427,8 @@ export default function App() {
     syncFromServer();
     // Sonra periyodik
     const id = setInterval(syncFromServer, 10000);
-    return () => clearInterval(id);
+    const dailyId = setInterval(syncDailyFromServer, 15000); // 15 sn'de bir daily refresh
+    return () => { clearInterval(id); clearInterval(dailyId); };
   }, [mode, user]);
 
   // 30 sn'de bir heartbeat — aktif çalışma varsa
@@ -1532,6 +1585,7 @@ export default function App() {
 
   // Çalışma başlat
   const startStudyWork = () => {
+    studyLastLocalActionRef.current = Date.now();
     const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
     setStudyState(s => ({
       ...s,
@@ -1554,6 +1608,7 @@ export default function App() {
       console.log('[startStudyBreak] zaten break/idle, atlanıyor');
       return;
     }
+    studyLastLocalActionRef.current = Date.now();
     const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
     setStudyState(s => {
       const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
@@ -1581,6 +1636,7 @@ export default function App() {
       console.log('[resumeStudyWork] zaten working, atlanıyor');
       return;
     }
+    studyLastLocalActionRef.current = Date.now();
     const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
     setStudyState(s => ({
       ...s,
@@ -1597,6 +1653,7 @@ export default function App() {
 
   // Pause (elle)
   const pauseStudy = () => {
+    studyLastLocalActionRef.current = Date.now();
     setStudyState(s => {
       if (s.phase !== 'working' && s.phase !== 'break') return s;
       const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
@@ -1618,6 +1675,7 @@ export default function App() {
 
   // Duraklatılmış çalışmaya devam et — sayaç KALDIĞI YERDEN
   const resumeFromPause = () => {
+    studyLastLocalActionRef.current = Date.now();
     setStudyState(s => {
       if (s.phase !== 'paused') return s;
       const newStartedAt = Date.now() - (s.accumulatedInPhase * 1000);
@@ -1637,6 +1695,7 @@ export default function App() {
 
   // Tamamen bitir — bugünkü oturumu kapat
   const stopStudy = () => {
+    studyLastLocalActionRef.current = Date.now();
     setStudyState(s => {
       if (s.phase === 'working') {
         const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
@@ -1658,25 +1717,16 @@ export default function App() {
   };
 
   // Otomatik phase geçişi — target time'ı hesapla, setTimeout ile tetikle
-  // Browser arka planda olsa bile setTimeout büyük ihtimalle çalışır
+  // KURAL: lock aktifken (sync'ten geldi) transition tetikleme.
   useEffect(() => {
     if (studyState.phase === 'idle' || studyState.phase === 'paused') return;
     
-    // ⚠️ ÖNEMLİ: Eğer state polling'den geldiyse (öteki cihaz değişikliği), 
-    // bu cihaz transition tetiklemesin. Sadece birincil cihaz transition yapar.
-    // _isFromSync flag ile işaretlenir, ilk transition kontrolünden sonra temizleriz.
-    if ((studyState as any)._isFromSync) {
-      // Flag'i temizle ki bir sonraki LOCAL change'de transition olsun
-      setStudyState(s => {
-        const ns = { ...s };
-        delete (ns as any)._isFromSync;
-        return ns;
-      });
-      return;
-    }
+    // ⚠️ Sync lock — son sync sonrası 200ms boyunca transition yapma
+    if (studyTransitionLockRef.current) return;
     
     const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
     if (studyState.phase === 'working' && preset.id === 'flexible') return;
+    if (studyState.phase === 'working' && preset.id === 'flowtime') return;
 
     let targetSec = 0;
     if (studyState.phase === 'working') {
@@ -1691,6 +1741,10 @@ export default function App() {
 
     // Hemen kontrol — arka plandan dönüldüğünde geçmiş olabilir
     if (remainingMs <= 0) {
+      // Sahip cihaz değilsek transition yapma — sahip cihaz yapacak
+      const isOwner = Date.now() - studyLastLocalActionRef.current < 30000;
+      if (!isOwner) return;
+      
       if (studyState.phase === 'working') {
         const nextBlockNumber = studyState.completedWorkBlocks + 1;
         const isLongBreak = nextBlockNumber % preset.longBreakEvery === 0;
@@ -1711,6 +1765,11 @@ export default function App() {
       if (cur.phase !== initialPhase || cur.phaseStartedAt !== initialPhaseStartedAt) {
         return; // State değişmiş, transition iptal
       }
+      // Sahip cihaz mı? Lock var mı?
+      if (studyTransitionLockRef.current) return;
+      const isOwner = Date.now() - studyLastLocalActionRef.current < 30000;
+      if (!isOwner) return; // Sahip değiliz, sahip yapacak
+      
       if (cur.phase === 'working') {
         const nextBlockNumber = cur.completedWorkBlocks + 1;
         const isLongBreak = nextBlockNumber % preset.longBreakEvery === 0;
@@ -9151,8 +9210,19 @@ export default function App() {
       phaseRemaining = Math.max(0, phaseTarget - phaseElapsed);
     }
 
-    // Bugünün gerçek anlık toplamı (aktif çalışma varsa ekle)
-    const liveTotal = studyState.todayTotalSeconds + 
+    // 🎯 GERÇEK BUGÜN TOPLAMI:
+    // 1) studyHistory'deki bugünkü daily kaydı = manuel/server truth (en güvenilir)
+    // 2) studyState.todayTotalSeconds = local biriken (şişebilir, ama yedek)
+    // 3) Aktif çalışma varsa canlı süreyi en üste ekle
+    const realTodayKey = todayStr();
+    const todayHistRec = studyHistory.find(h => h.date === realTodayKey);
+    const baseTodayFromHistory = todayHistRec?.totalSeconds ?? 0;
+    const baseTodayFromState = studyState.todayTotalSeconds;
+    // History daha güncelse o, yoksa state — fakat ikisinden büyüğünü almak risky (şişen value alır)
+    // Bu yüzden ÖNCE history dene, yoksa state
+    const baseToday = baseTodayFromHistory > 0 ? baseTodayFromHistory : baseTodayFromState;
+    
+    const liveTotal = baseToday + 
       (studyState.phase === 'working' 
         ? Math.max(0, phaseElapsed - studyState.accumulatedInPhase) 
         : 0);

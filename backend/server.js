@@ -75,6 +75,87 @@ app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '50mb' }));
 app.use('/pdftest/files', express.static(UPLOADS_DIR));
 
+// ═════════════════════════════════════════════════════════════════════════
+// 🎯 SERVER-SIDE TRUTH — Event'lerden gerçek süreleri hesapla
+// State'e güvenme, event listesinden hesapla. Çift sayımı önler.
+// ═════════════════════════════════════════════════════════════════════════
+function calculateTrueSecondsFromEvents(uid, date) {
+  const events = db.prepare(
+    "SELECT type, ts FROM study_events WHERE uid=? AND date=? AND type!='heartbeat' ORDER BY ts ASC"
+  ).all(uid, date);
+  
+  let workSec = 0;
+  let breakSec = 0;
+  let pauseSec = 0;
+  let workStart = 0;
+  let breakStart = 0;
+  let pauseStart = 0;
+  
+  for (const e of events) {
+    if (e.type === 'start' || e.type === 'resume_after_break') {
+      // Eğer hala işlenmemiş bir state varsa, kapat
+      if (workStart) workSec += Math.floor((e.ts - workStart) / 1000);
+      if (breakStart) breakSec += Math.floor((e.ts - breakStart) / 1000);
+      if (pauseStart) pauseSec += Math.floor((e.ts - pauseStart) / 1000);
+      workStart = e.ts;
+      breakStart = 0;
+      pauseStart = 0;
+    } else if (e.type === 'resume_from_pause') {
+      if (pauseStart) pauseSec += Math.floor((e.ts - pauseStart) / 1000);
+      workStart = e.ts;
+      pauseStart = 0;
+    } else if (e.type === 'pause') {
+      if (workStart) workSec += Math.floor((e.ts - workStart) / 1000);
+      workStart = 0;
+      pauseStart = e.ts;
+    } else if (e.type === 'break_start') {
+      if (workStart) workSec += Math.floor((e.ts - workStart) / 1000);
+      workStart = 0;
+      breakStart = e.ts;
+    } else if (e.type === 'stop') {
+      if (workStart) workSec += Math.floor((e.ts - workStart) / 1000);
+      if (breakStart) breakSec += Math.floor((e.ts - breakStart) / 1000);
+      if (pauseStart) pauseSec += Math.floor((e.ts - pauseStart) / 1000);
+      workStart = 0;
+      breakStart = 0;
+      pauseStart = 0;
+    }
+  }
+  
+  // Açık kalan state varsa — şu ana kadar say (canlı oturum)
+  const now = Date.now();
+  if (workStart) workSec += Math.floor((now - workStart) / 1000);
+  if (breakStart) breakSec += Math.floor((now - breakStart) / 1000);
+  if (pauseStart) pauseSec += Math.floor((now - pauseStart) / 1000);
+  
+  return { workSec: Math.max(0, workSec), breakSec: Math.max(0, breakSec), pauseSec: Math.max(0, pauseSec) };
+}
+
+function getCurrentPhaseFromEvents(uid, date) {
+  // En son event'in tipine göre mevcut phase'i belirle
+  const lastEvent = db.prepare(
+    "SELECT type, ts, meta FROM study_events WHERE uid=? AND date=? AND type!='heartbeat' ORDER BY ts DESC LIMIT 1"
+  ).get(uid, date);
+  
+  if (!lastEvent) return { phase: 'idle', phaseStartedAt: 0 };
+  
+  if (lastEvent.type === 'start' || lastEvent.type === 'resume_from_pause' || lastEvent.type === 'resume_after_break') {
+    return { phase: 'working', phaseStartedAt: lastEvent.ts };
+  }
+  if (lastEvent.type === 'pause') {
+    return { phase: 'paused', phaseStartedAt: lastEvent.ts };
+  }
+  if (lastEvent.type === 'break_start') {
+    return { phase: 'break', phaseStartedAt: lastEvent.ts };
+  }
+  if (lastEvent.type === 'stop') {
+    return { phase: 'idle', phaseStartedAt: 0 };
+  }
+  return { phase: 'idle', phaseStartedAt: 0 };
+}
+
+
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 async function requireAuth(req, res, next) {
   const h = req.headers.authorization;
@@ -539,7 +620,49 @@ app.get('/pdftest/api/study/daily', requireAuth, (req, res) => {
     const rows = db.prepare(
       'SELECT date, total_seconds, completed_blocks, mode, goal_minutes FROM study_daily WHERE uid=? ORDER BY date DESC LIMIT ?'
     ).all(req.uid, days);
-    res.json({ daily: rows });
+    
+    // 🎯 Bugünkü değeri event'lerden hesapla — daily'deki şişmiş değer yerine
+    const today = new Date().toLocaleDateString('en-CA');
+    const todayTruth = calculateTrueSecondsFromEvents(req.uid, today);
+    
+    const updatedRows = rows.map(r => {
+      if (r.date === today) {
+        return { ...r, total_seconds: todayTruth.workSec };
+      }
+      return r;
+    });
+
+// 🔄 Bugünkü daily'i event'lerden yeniden hesapla — düzeltme aracı
+app.post('/pdftest/api/study/recompute', requireAuth, (req, res) => {
+  try {
+    const today = new Date().toLocaleDateString('en-CA');
+    const truth = calculateTrueSecondsFromEvents(req.uid, today);
+    
+    const existing = db.prepare('SELECT 1 FROM study_daily WHERE uid=? AND date=?').get(req.uid, today);
+    if (existing) {
+      db.prepare('UPDATE study_daily SET total_seconds=?, last_ts=? WHERE uid=? AND date=?').run(truth.workSec, Date.now(), req.uid, today);
+    } else {
+      db.prepare('INSERT INTO study_daily (uid, date, total_seconds, completed_blocks, mode, first_ts, last_ts) VALUES (?, ?, ?, 0, ?, ?, ?)').run(req.uid, today, truth.workSec, 'pomodoro', Date.now(), Date.now());
+    }
+    db.prepare('UPDATE study_state SET today_total_seconds=?, today_date=? WHERE uid=?').run(truth.workSec, today, req.uid);
+    
+    res.json({ ok: true, total_seconds: truth.workSec, work: truth.workSec, break: truth.breakSec, pause: truth.pauseSec });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+    
+    // Bugün yoksa ekle
+    if (!updatedRows.find(r => r.date === today) && todayTruth.workSec > 0) {
+      updatedRows.unshift({
+        date: today,
+        total_seconds: todayTruth.workSec,
+        completed_blocks: 0,
+        mode: 'pomodoro',
+        goal_minutes: 0
+      });
+    }
+    
+    res.json({ daily: updatedRows });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 

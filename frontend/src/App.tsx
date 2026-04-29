@@ -388,6 +388,185 @@ const createImageWithNotes = (base64Image: string, q: SavedQuestion): Promise<st
   });
 };
 
+// ── Bugün İstatistik Sekmesi ──────────────────────────────────────────
+function TodayStatsTab({ user, liveTotal, goalSec, completedBlocks, phase, todayTabEvents, setTodayTabEvents, todayTabLoading, setTodayTabLoading, openSessionsModal }: any) {
+  React.useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    const load = async () => {
+      setTodayTabLoading(true);
+      try {
+        const token = await user.getIdToken();
+        const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+        const today = new Date();
+        const dateStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+        const r = await fetch(`${BASE}/study/sessions?date=${dateStr}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (r.ok && !cancelled) {
+          const { events } = await r.json();
+          setTodayTabEvents(events || []);
+        }
+      } catch {}
+      if (!cancelled) setTodayTabLoading(false);
+    };
+    load();
+    // Aktif çalışma varsa her 15 sn'de yenile
+    const id = setInterval(load, phase === 'idle' ? 60000 : 15000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [user, phase]);
+
+  const today = new Date();
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+  const fillPct = goalSec > 0 ? Math.round((liveTotal / goalSec) * 100) : 0;
+  const remaining = Math.max(0, goalSec - liveTotal);
+  const fmtTime = (ts: number) => {
+    const d = new Date(ts);
+    return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  };
+  const fmtDur = (sec: number) => {
+    if (sec < 60) return `${sec}sn`;
+    if (sec < 3600) return `${Math.floor(sec/60)}dk`;
+    const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60);
+    return m > 0 ? `${h}s ${m}dk` : `${h}s`;
+  };
+
+  // Oturum gruplama
+  type Group = { startTs: number; events: any[]; durationSec: number; };
+  const groups: Group[] = [];
+  let current: Group | null = null;
+  let lastWorkStart = 0;
+  for (const e of todayTabEvents) {
+    if (e.type === 'start') {
+      if (current) groups.push(current);
+      current = { startTs: e.ts, events: [e], durationSec: 0 };
+      lastWorkStart = e.ts;
+    } else {
+      if (!current) current = { startTs: e.ts, events: [], durationSec: 0 };
+      current.events.push(e);
+      if (e.type === 'pause' || e.type === 'break_start' || e.type === 'stop') {
+        if (lastWorkStart > 0) {
+          current.durationSec += Math.max(0, Math.floor((e.ts - lastWorkStart) / 1000));
+          lastWorkStart = 0;
+        }
+      } else if (e.type === 'resume_from_pause' || e.type === 'resume_after_break') {
+        lastWorkStart = e.ts;
+      }
+    }
+  }
+  if (current) groups.push(current);
+
+  const eventLabel = (t: string) => ({
+    'start': '▶️ Başlat',
+    'pause': '⏸ Duraklat',
+    'resume_from_pause': '▶️ Devam',
+    'break_start': '☕ Mola',
+    'resume_after_break': '▶️ Çalışmaya dön',
+    'stop': '⏹ Bitir',
+  } as any)[t] || t;
+  const eventColor = (t: string) => {
+    if (t === 'start' || t.startsWith('resume')) return 'text-emerald-400';
+    if (t === 'pause') return 'text-slate-400';
+    if (t === 'break_start') return 'text-amber-400';
+    if (t === 'stop') return 'text-rose-400';
+    return 'text-slate-400';
+  };
+
+  return (
+    <div className="space-y-3">
+      {/* Hedef İlerleme */}
+      <div className="bg-gradient-to-br from-blue-950/30 to-violet-950/30 border border-blue-700/30 rounded-xl p-3">
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-xs font-bold text-blue-300">🎯 Bugünkü Hedef</div>
+          <div className="text-[10px] text-slate-400">{fmtDur(liveTotal)} / {fmtDur(goalSec)}</div>
+        </div>
+        <div className="h-3 bg-slate-800 rounded-full overflow-hidden mb-1">
+          <div
+            className={`h-full rounded-full transition-all ${
+              fillPct >= 100 ? 'bg-gradient-to-r from-emerald-500 to-emerald-400' :
+              fillPct >= 70 ? 'bg-gradient-to-r from-blue-500 to-blue-400' :
+              fillPct >= 30 ? 'bg-gradient-to-r from-amber-500 to-amber-400' :
+              'bg-gradient-to-r from-rose-500 to-rose-400'
+            }`}
+            style={{ width: `${Math.min(100, fillPct)}%` }}
+          />
+        </div>
+        <div className="flex items-center justify-between text-[10px]">
+          <span className={fillPct >= 100 ? 'text-emerald-400 font-bold' : 'text-slate-400'}>
+            %{fillPct} {fillPct >= 100 ? '✓ Hedef tamamlandı!' : ''}
+          </span>
+          {fillPct < 100 && <span className="text-slate-500">{fmtDur(remaining)} kaldı</span>}
+        </div>
+      </div>
+
+      {/* Mini İstatistikler */}
+      <div className="grid grid-cols-3 gap-2">
+        <div className="bg-slate-800/40 rounded-lg p-2 text-center">
+          <div className="text-[9px] text-slate-500">Çalışma</div>
+          <div className="text-sm font-bold text-emerald-400">{fmtDur(liveTotal)}</div>
+        </div>
+        <div className="bg-slate-800/40 rounded-lg p-2 text-center">
+          <div className="text-[9px] text-slate-500">Oturum</div>
+          <div className="text-sm font-bold text-blue-400">{groups.length}</div>
+        </div>
+        <div className="bg-slate-800/40 rounded-lg p-2 text-center">
+          <div className="text-[9px] text-slate-500">Tamamlanan</div>
+          <div className="text-sm font-bold text-violet-400">{completedBlocks} blok</div>
+        </div>
+      </div>
+
+      {/* Timeline */}
+      {todayTabLoading && groups.length === 0 ? (
+        <div className="text-center text-slate-500 py-6 text-xs">Yükleniyor...</div>
+      ) : groups.length === 0 ? (
+        <div className="bg-slate-800/30 rounded-xl p-6 text-center">
+          <div className="text-3xl mb-2">⏰</div>
+          <div className="text-sm font-bold text-slate-300">Henüz çalışma yok</div>
+          <div className="text-[11px] text-slate-500 mt-1">Sayacı başlatınca buraya kayıt düşer</div>
+        </div>
+      ) : (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs font-bold text-slate-300">📋 Bugünün Oturumları</div>
+            <button
+              onClick={() => openSessionsModal(todayKey)}
+              className="text-[10px] text-blue-400 hover:text-blue-300"
+            >Detaylı görüntüle →</button>
+          </div>
+          <div className="space-y-2">
+            {groups.map((g, gi) => (
+              <div key={gi} className="bg-slate-800/40 border border-slate-700/30 rounded-lg overflow-hidden">
+                <div className="px-3 py-2 flex items-center justify-between border-b border-slate-700/30">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-full bg-emerald-600 text-white text-[10px] font-bold flex items-center justify-center">{gi + 1}</div>
+                    <div>
+                      <div className="text-[11px] font-bold text-white">Oturum {gi + 1}</div>
+                      <div className="text-[10px] text-slate-400">{fmtTime(g.startTs)} başladı</div>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-sm font-bold text-emerald-400 font-mono">{fmtDur(g.durationSec)}</div>
+                    <div className="text-[9px] text-slate-500">{g.events.length} kayıt</div>
+                  </div>
+                </div>
+                {/* Mini event listesi */}
+                <div className="px-3 py-1.5 flex items-center gap-2 flex-wrap text-[10px]">
+                  {g.events.slice(0, 6).map((e: any, ei: number) => (
+                    <span key={ei} className={`${eventColor(e.type)} font-mono`}>
+                      {fmtTime(e.ts)} {eventLabel(e.type).split(' ')[0]}
+                    </span>
+                  ))}
+                  {g.events.length > 6 && <span className="text-slate-500">+{g.events.length - 6}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const { user, signInWithGoogle, logout, loginWithPassword } = useAuth();
   const [uploadProgress, setUploadProgress] = useState<Record<string, {name: string, pct: number}>>({});
@@ -1705,7 +1884,15 @@ export default function App() {
   const maxPageReachedRef = useRef<number>(0);
   const [pagesRead, setPagesRead] = useState<number>(0); // bu session'da okunan sayfa sayısı
   const [showPageGoalModal, setShowPageGoalModal] = useState<boolean>(false);
-  const [studyStatsTab, setStudyStatsTab] = useState<'week' | 'month' | 'detail'>('week');
+  const [studyStatsTab, setStudyStatsTab] = useState<'today' | 'week' | 'month' | 'detail'>('today');
+  const [todayTabEvents, setTodayTabEvents] = useState<any[]>([]);
+  const [todayTabLoading, setTodayTabLoading] = useState<boolean>(false);
+  // Hızlı kart/not ekle modal'ı (çalışma sayfası floating button)
+  const [showQuickAddModal, setShowQuickAddModal] = useState<false | 'card' | 'note' | 'question'>(false);
+  const [quickAddSubject, setQuickAddSubject] = useState<string>('');
+  const [quickAddTopic, setQuickAddTopic] = useState<string>('');
+  const [quickAddFront, setQuickAddFront] = useState<string>('');
+  const [quickAddBack, setQuickAddBack] = useState<string>('');
   const [showSessionsModal, setShowSessionsModal] = useState<boolean>(false);
   const [sessionsModalDate, setSessionsModalDate] = useState<string>(''); // '' = bugün
   const [sessionsList, setSessionsList] = useState<any[]>([]);
@@ -4668,8 +4855,22 @@ export default function App() {
               >
                 <X size={16} />
               </button>
-              {/* FIX: Odak modunda not kes / soru kes butonları — küçük floating */}
+              {/* FIX: Odak modunda not kes / soru kes / zoom butonları — küçük floating */}
               <div className="fixed bottom-4 right-2 z-[80] flex flex-col gap-2">
+                <button
+                  onClick={handleZoomIn}
+                  className="backdrop-blur-md w-11 h-11 rounded-full flex items-center justify-center shadow-lg border transition-all bg-slate-900/70 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/50"
+                  title="Yakınlaştır"
+                >
+                  <ZoomIn size={18} />
+                </button>
+                <button
+                  onClick={handleZoomOut}
+                  className="backdrop-blur-md w-11 h-11 rounded-full flex items-center justify-center shadow-lg border transition-all bg-slate-900/70 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/50"
+                  title="Uzaklaştır"
+                >
+                  <ZoomOut size={18} />
+                </button>
                 <button
                   onClick={() => {
                     setIsNoteCropMode(prev => !prev);
@@ -4715,23 +4916,6 @@ export default function App() {
                   title="Buraya Kadar Okudum"
                 >
                   <Check size={18} />
-                </button>
-              </div>
-              {/* Sol altta zoom butonları (Odak modu) */}
-              <div className="fixed bottom-4 left-2 z-[80] flex flex-col gap-2">
-                <button
-                  onClick={handleZoomIn}
-                  className="backdrop-blur-md w-11 h-11 rounded-full flex items-center justify-center shadow-lg border transition-all bg-slate-900/70 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/50"
-                  title="Yakınlaştır"
-                >
-                  <ZoomIn size={18} />
-                </button>
-                <button
-                  onClick={handleZoomOut}
-                  className="backdrop-blur-md w-11 h-11 rounded-full flex items-center justify-center shadow-lg border transition-all bg-slate-900/70 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/50"
-                  title="Uzaklaştır"
-                >
-                  <ZoomOut size={18} />
                 </button>
               </div>
               {/* Üstte minimal ilerleme barı (sayfa hedefi varsa) */}
@@ -5986,6 +6170,101 @@ export default function App() {
       }
     } catch {}
     setSessionsLoading(false);
+  };
+
+  // Hızlı Kart/Not ekle modal — çalışma sayfası floating'den açılır
+  const renderQuickAddModal = () => {
+    if (!showQuickAddModal) return null;
+    const close = () => {
+      setShowQuickAddModal(false);
+      setQuickAddFront(''); setQuickAddBack('');
+    };
+    const saveCard = async () => {
+      if (!quickAddFront.trim()) return;
+      const newCard: any = {
+        id: uuidv4(),
+        subject: quickAddSubject.trim() || 'Genel',
+        topic: quickAddTopic.trim() || '',
+        front: quickAddFront.trim(),
+        back: quickAddBack.trim(),
+        easiness: 2.5, interval: 0, repetitions: 0,
+        nextReviewDate: new Date().toISOString().split('T')[0],
+        createdAt: Date.now(), reviewHistory: [],
+      };
+      await addMemorizeCard(newCard);
+      close();
+    };
+    const titleMap: any = { card: 'Ezber Kartı', note: 'Not', question: 'Soru' };
+    const t = titleMap[showQuickAddModal as string] || 'Kart';
+    return (
+      <div className="fixed inset-0 z-[70] bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-2 animate-in fade-in duration-200" onClick={close}>
+        <div className="bg-slate-900 rounded-2xl w-full max-w-md max-h-[85vh] overflow-y-auto border border-slate-700/50 shadow-2xl" onClick={e => e.stopPropagation()}>
+          <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+            <h3 className="text-base font-bold text-white">⚡ Hızlı {t} Ekle</h3>
+            <button onClick={close} className="text-slate-400 hover:text-white p-1.5 rounded-lg bg-slate-800/60">
+              <X size={16} />
+            </button>
+          </div>
+          <div className="p-4 space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">Ders</label>
+                <input
+                  value={quickAddSubject} onChange={e => setQuickAddSubject(e.target.value)}
+                  placeholder="Tarih, Matematik..."
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">Konu</label>
+                <input
+                  value={quickAddTopic} onChange={e => setQuickAddTopic(e.target.value)}
+                  placeholder="(opsiyonel)"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-white"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">
+                {showQuickAddModal === 'card' ? '🃏 Ön yüz (Soru/Kavram)' : 'Başlık'}
+              </label>
+              <textarea
+                value={quickAddFront} onChange={e => setQuickAddFront(e.target.value)}
+                placeholder="örn: 1923'te ne oldu?"
+                rows={2}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-white resize-none"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">
+                {showQuickAddModal === 'card' ? '✓ Arka yüz (Cevap)' : 'Detay'}
+              </label>
+              <textarea
+                value={quickAddBack} onChange={e => setQuickAddBack(e.target.value)}
+                placeholder="örn: Cumhuriyet ilan edildi"
+                rows={3}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-white resize-none"
+              />
+            </div>
+            <div className="bg-blue-950/30 border border-blue-700/30 rounded-lg p-2 text-[10px] text-blue-300">
+              💡 Aralıklı tekrar (SM-2) sistemi: bu kart yarın, 3 gün sonra, 1 hafta sonra... otomatik tekrar gelir.
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={close}
+                className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold py-2.5 rounded-lg"
+              >İptal</button>
+              <button
+                onClick={saveCard}
+                disabled={!quickAddFront.trim()}
+                className="flex-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs font-bold py-2.5 rounded-lg"
+              >💾 Kaydet</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   };
 
   const renderSessionsModal = () => {
@@ -8366,6 +8645,7 @@ export default function App() {
               <h3 className="text-sm font-bold text-slate-200">📊 İstatistikler</h3>
               <div className="flex items-center gap-0.5 bg-slate-900/60 rounded-lg p-0.5">
                 {[
+                  { id: 'today', label: 'Bugün' },
                   { id: 'week', label: 'Hafta' },
                   { id: 'month', label: 'Ay' },
                   { id: 'detail', label: 'Detay' },
@@ -8373,7 +8653,7 @@ export default function App() {
                   <button
                     key={t.id}
                     onClick={() => setStudyStatsTab(t.id as any)}
-                    className={`text-[10px] font-bold px-2.5 py-1 rounded-md transition-colors ${
+                    className={`text-[10px] font-bold px-2 py-1 rounded-md transition-colors ${
                       studyStatsTab === t.id
                         ? 'bg-blue-600 text-white shadow-md'
                         : 'text-slate-400 hover:text-white'
@@ -8382,6 +8662,23 @@ export default function App() {
                 ))}
               </div>
             </div>
+
+            {/* BUGÜN — bugünün event timeline'ı */}
+            {studyStatsTab === 'today' && (() => {
+              // Render olunca ilk seferde event'leri çek
+              return <TodayStatsTab
+                user={user}
+                liveTotal={liveTotal}
+                goalSec={goalSec}
+                completedBlocks={studyState.completedWorkBlocks}
+                phase={studyState.phase}
+                todayTabEvents={todayTabEvents}
+                setTodayTabEvents={setTodayTabEvents}
+                todayTabLoading={todayTabLoading}
+                setTodayTabLoading={setTodayTabLoading}
+                openSessionsModal={openSessionsModal}
+              />;
+            })()}
 
             {/* HAFTA */}
             {studyStatsTab === 'week' && (() => {
@@ -8419,19 +8716,19 @@ export default function App() {
 
                   {/* Bar chart with goal line */}
                   <div className="relative">
-                    <div className="flex items-end justify-between gap-2 h-32 relative">
+                    <div className="flex items-stretch justify-between gap-2 h-40 relative">
                       {/* Hedef çizgisi — chart kapsayıcısı içinde */}
                       {(() => {
                         const chartMax = Math.max(goalSec, maxDaySec, 1);
                         const goalPos = (goalSec / chartMax) * 100;
-                        if (goalPos > 95) return null; // tepe çok yakınsa gizle
+                        if (goalPos > 95) return null;
                         return (
                           <div
-                            className="absolute left-0 right-0 border-t-2 border-dashed border-emerald-500/60 pointer-events-none flex items-center justify-end pr-1 z-10"
-                            style={{ bottom: `${goalPos}%` }}
+                            className="absolute left-0 right-0 border-t-2 border-dashed border-emerald-500/70 pointer-events-none flex items-center justify-end pr-1 z-10"
+                            style={{ bottom: `${goalPos}%`, height: 0 }}
                           >
-                            <span className="text-[9px] text-emerald-300 bg-slate-900/90 px-1.5 py-0.5 rounded font-bold">
-                              🎯 {Math.floor(goalSec/3600)}s{goalSec%3600 ? ` ${Math.floor((goalSec%3600)/60)}d` : ''}
+                            <span className="text-[9px] text-emerald-300 bg-slate-900 px-1.5 py-0.5 rounded font-bold whitespace-nowrap -translate-y-2">
+                              🎯 Hedef {Math.floor(goalSec/3600)}s{goalSec%3600 ? ` ${Math.floor((goalSec%3600)/60)}d` : ''}
                             </span>
                           </div>
                         );
@@ -8442,11 +8739,19 @@ export default function App() {
                         const heightPct = (d.totalSeconds / chartMax) * 100;
                         const isToday = i === 6;
                         return (
-                          <button key={d.date} onClick={() => openSessionsModal(d.date)} className="flex-1 flex flex-col items-center gap-0.5 group cursor-pointer focus:outline-none">
-                            <div className="text-[8px] text-slate-400 font-mono opacity-0 group-hover:opacity-100 transition-opacity h-3">
-                              {d.totalSeconds > 0 ? formatHMS(d.totalSeconds) : ''}
+                          <button
+                            key={d.date}
+                            onClick={() => openSessionsModal(d.date)}
+                            className="flex-1 flex flex-col items-center gap-0.5 group cursor-pointer focus:outline-none h-full"
+                          >
+                            {/* Saat etiketi - barın üstünde */}
+                            <div className="text-[9px] font-bold h-3 flex items-end" style={{ color: d.totalSeconds > 0 ? '#cbd5e1' : 'transparent' }}>
+                              {d.totalSeconds > 0 ? (
+                                <>{Math.floor(d.totalSeconds/3600)}s{Math.floor((d.totalSeconds%3600)/60) > 0 ? ` ${Math.floor((d.totalSeconds%3600)/60)}d` : ''}</>
+                              ) : '-'}
                             </div>
-                            <div className="flex-1 w-full flex flex-col justify-end relative">
+                            {/* Bar alanı */}
+                            <div className="flex-1 w-full flex flex-col justify-end relative min-h-0">
                               <div
                                 className={`w-full rounded-t-md transition-all ${
                                   hitGoal ? 'bg-gradient-to-t from-emerald-600 to-emerald-400' :
@@ -8455,24 +8760,12 @@ export default function App() {
                                   d.totalSeconds > 0 ? 'bg-gradient-to-t from-rose-600 to-rose-400' : 
                                   'bg-slate-700/40'
                                 } ${isToday ? 'ring-2 ring-white/30' : ''} group-hover:opacity-80`}
-                                style={{ height: `${Math.max(2, heightPct)}%` }}
+                                style={{ height: `${Math.max(d.totalSeconds > 0 ? 8 : 2, heightPct)}%` }}
                                 title={`${d.dayLabel}: ${formatHMS(d.totalSeconds)} — tıkla detay`}
                               />
-                              {d.totalSeconds > 0 && (
-                                <div
-                                  className="absolute left-0 right-0 text-center text-[8px] font-bold text-white/90 pointer-events-none"
-                                  style={{ bottom: `${Math.min(95, heightPct + 1)}%` }}
-                                >
-                                  {Math.floor(d.totalSeconds / 3600)}{Math.floor(d.totalSeconds / 3600) > 0 ? 's' : ''}{Math.floor((d.totalSeconds % 3600) / 60) > 0 ? `${Math.floor((d.totalSeconds % 3600) / 60)}d` : ''}
-                                </div>
-                              )}
                             </div>
-                            <div className={`text-[10px] font-medium ${isToday ? 'text-white' : 'text-slate-400'}`}>
-                              {d.dayLabel}
-                            </div>
-                            <div className={`text-[8px] ${isToday ? 'text-blue-400 font-bold' : 'text-slate-600'}`}>
-                              {parseInt(d.date.split('-')[2])}
-                            </div>
+                            <div className={`text-[10px] font-medium ${isToday ? 'text-white' : 'text-slate-400'}`}>{d.dayLabel}</div>
+                            <div className={`text-[8px] ${isToday ? 'text-blue-400 font-bold' : 'text-slate-600'}`}>{parseInt(d.date.split('-')[2])}</div>
                           </button>
                         );
                       })}
@@ -8852,6 +9145,18 @@ export default function App() {
 
           <div className="h-4" />
         </div>
+
+        {/* Floating Hızlı Ekle FAB — sayaç aktifken sağ altta */}
+        {(studyState.phase === 'working' || studyState.phase === 'break' || studyState.phase === 'paused') && (
+          <button
+            onClick={() => setShowQuickAddModal('card')}
+            className="fixed bottom-6 right-4 z-50 bg-gradient-to-br from-emerald-600 to-emerald-700 text-white shadow-2xl shadow-emerald-900/50 rounded-full px-4 py-3 flex items-center gap-2 hover:scale-105 active:scale-95 transition-transform border border-emerald-500/40"
+            title="Hızlı Ezber Kartı Ekle"
+          >
+            <span className="text-lg">🃏</span>
+            <span className="text-xs font-bold">Hızlı Kart</span>
+          </button>
+        )}
       </div>
     );
   };
@@ -10657,6 +10962,7 @@ export default function App() {
       {renderQuestionCropModal()}
       {renderPageGoalModal()}
       {renderSessionsModal()}
+      {renderQuickAddModal()}
       {renderNoteLayoutBuilder()}
       {renderNoteReview()}
       {renderAddMemorizeModal()}

@@ -964,12 +964,9 @@ export default function App() {
   const syncStudyStateToServer = async () => {
     if (!user) return;
     const s = studyStateRef.current;
-    // Aktif çalışma varsa güncel total hesapla
-    let currentTotal = s.todayTotalSeconds;
-    if (s.phase === 'working') {
-      const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
-      currentTotal = s.todayTotalSeconds + Math.max(0, elapsed - s.accumulatedInPhase);
-    }
+    // Sunucuya SADECE KARARLI TOTAL gönder — phase çıkışlarında zaten doğru hesaplanmış oluyor.
+    // Live ekleme yapmıyoruz, çünkü polling bu değeri çekip lokali güncelliyor → çift sayım olurdu.
+    // todayTotalSeconds sadece pause/break/stop fonksiyonlarında güncellenir, heartbeat'te değil.
     try {
       const token = await user.getIdToken();
       const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
@@ -982,7 +979,7 @@ export default function App() {
           phase_started_at: s.phaseStartedAt,
           accumulated_in_phase: s.accumulatedInPhase,
           completed_blocks: s.completedWorkBlocks,
-          today_total_seconds: currentTotal,
+          today_total_seconds: s.todayTotalSeconds, // <-- sadece kararlı değer
           today_date: s.todayDate,
         }),
       });
@@ -1141,15 +1138,14 @@ export default function App() {
 
         // Aynı gün — sunucu daha güncelse SUNUCUYA UY
         // (öteki cihazda çalışmaya devam edilmiş olabilir)
-        const serverNewer = serverState.updated_at && (serverState.updated_at > (localS as any)._lastSync || 0);
+        const localUpdatedAt = (localS as any)._lastUpdate || 0;
+        const serverUpdatedAt = serverState.updated_at || 0;
+        const serverIsNewer = serverUpdatedAt > localUpdatedAt + 5000; // 5sn buffer
         const phaseDiffers = serverState.phase !== localS.phase;
-        const totalDiffers = Math.abs((serverState.today_total_seconds || 0) - localS.todayTotalSeconds) > 5;
+        const totalDiffers = Math.abs((serverState.today_total_seconds || 0) - localS.todayTotalSeconds) > 30;
         
-        if (phaseDiffers || totalDiffers) {
-          // Yerel kullanıcının aktif inputu daha yeni olabilir — son 5 sn'de buton bastıysa override etme
-          const localActedRecently = localS.phaseStartedAt && (Date.now() - localS.phaseStartedAt < 5000);
-          if (localActedRecently && !phaseDiffers) return;
-
+        // Sadece gerçekten anlamlı bir fark varsa ve sunucu daha yeniyse senkron
+        if ((phaseDiffers || totalDiffers) && (serverIsNewer || phaseDiffers)) {
           setStudyState(s => ({
             ...s,
             phase: (serverState.phase as any) || s.phase,
@@ -1159,7 +1155,7 @@ export default function App() {
             completedWorkBlocks: serverState.completed_blocks || 0,
             todayTotalSeconds: serverState.today_total_seconds || 0,
             todayDate: serverState.today_date || s.todayDate,
-            _lastSync: Date.now(),
+            _lastUpdate: Date.now(),
           } as any));
         }
       } catch {}
@@ -1204,10 +1200,13 @@ export default function App() {
         const elapsed = Math.floor((Date.now() - s.phaseStartedAt) / 1000);
         currentTotal = s.todayTotalSeconds + Math.max(0, elapsed - s.accumulatedInPhase);
       }
+      // Beacon: çalışmayı pause ediyoruz ki sayfa tekrar açıldığında polling
+      // bu değeri çekip working'e devam ederek çift saymasın
       const body = new Blob([JSON.stringify({
-        phase: s.phase, mode: s.mode,
-        phase_started_at: s.phaseStartedAt,
-        accumulated_in_phase: s.accumulatedInPhase,
+        phase: s.phase === 'working' ? 'paused' : s.phase, // working → paused
+        mode: s.mode,
+        phase_started_at: 0,
+        accumulated_in_phase: 0,
         completed_blocks: s.completedWorkBlocks,
         today_total_seconds: currentTotal,
         today_date: s.todayDate,
@@ -1707,6 +1706,10 @@ export default function App() {
   const [pagesRead, setPagesRead] = useState<number>(0); // bu session'da okunan sayfa sayısı
   const [showPageGoalModal, setShowPageGoalModal] = useState<boolean>(false);
   const [studyStatsTab, setStudyStatsTab] = useState<'week' | 'month' | 'detail'>('week');
+  const [showSessionsModal, setShowSessionsModal] = useState<boolean>(false);
+  const [sessionsModalDate, setSessionsModalDate] = useState<string>(''); // '' = bugün
+  const [sessionsList, setSessionsList] = useState<any[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState<boolean>(false);
   const [pageGoalInput, setPageGoalInput] = useState<string>('');
   // FIX: Not kategorisi seçimi (not kesme modalında)
   const [noteCropCategory, setNoteCropCategory] = useState<'onemli' | 'ornek' | 'tanim' | 'formul' | 'diger'>('onemli');
@@ -5964,6 +5967,232 @@ export default function App() {
   };
 
   // FIX: Soru kayıt modalı — ana mount'tan çağrılır ki PDF olmasa bile çalışsın (fotoğraftan ekleme için)
+  // ── Çalışma Oturumları Modal — gün bazında detay + silme ─────────────
+  const openSessionsModal = async (date: string) => {
+    setSessionsModalDate(date);
+    setShowSessionsModal(true);
+    setSessionsList([]);
+    setSessionsLoading(true);
+    if (!user) { setSessionsLoading(false); return; }
+    try {
+      const token = await user.getIdToken();
+      const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+      const r = await fetch(`${BASE}/study/sessions?date=${date}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (r.ok) {
+        const { events } = await r.json();
+        setSessionsList(events || []);
+      }
+    } catch {}
+    setSessionsLoading(false);
+  };
+
+  const renderSessionsModal = () => {
+    if (!showSessionsModal) return null;
+    const events = sessionsList;
+    
+    // Eventleri oturumlara grupla — start..stop arasi
+    type SessionGroup = { start?: any; events: any[]; durationSec: number; };
+    const groups: SessionGroup[] = [];
+    let current: SessionGroup | null = null;
+    let lastWorkStart = 0;
+    let totalWork = 0;
+    
+    for (const e of events) {
+      if (e.type === 'start') {
+        if (current) groups.push(current);
+        current = { start: e, events: [e], durationSec: 0 };
+        lastWorkStart = e.ts;
+      } else {
+        if (!current) current = { events: [], durationSec: 0 };
+        current.events.push(e);
+        if (e.type === 'pause' || e.type === 'break_start' || e.type === 'stop') {
+          if (lastWorkStart > 0) {
+            const sec = Math.max(0, Math.floor((e.ts - lastWorkStart) / 1000));
+            totalWork += sec;
+            current.durationSec += sec;
+            lastWorkStart = 0;
+          }
+        } else if (e.type === 'resume_from_pause' || e.type === 'resume_after_break') {
+          lastWorkStart = e.ts;
+        }
+      }
+    }
+    if (current) groups.push(current);
+    
+    const fmtTime = (ts: number) => {
+      const d = new Date(ts);
+      return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+    };
+    const fmtDur = (sec: number) => {
+      if (sec < 60) return `${sec}sn`;
+      if (sec < 3600) return `${Math.floor(sec/60)}dk ${sec%60}sn`;
+      return `${Math.floor(sec/3600)}sa ${Math.floor((sec%3600)/60)}dk`;
+    };
+    const eventLabel = (type: string) => {
+      const map: Record<string,string> = {
+        'start': '▶️ Başlat',
+        'pause': '⏸ Duraklat',
+        'resume_from_pause': '▶️ Devam (duraklatıldı)',
+        'break_start': '☕ Mola',
+        'resume_after_break': '▶️ Çalışmaya dön',
+        'stop': '⏹ Bitir',
+      };
+      return map[type] || type;
+    };
+    const eventColor = (type: string) => {
+      if (type === 'start' || type.startsWith('resume')) return 'text-emerald-400';
+      if (type === 'pause') return 'text-slate-400';
+      if (type === 'break_start') return 'text-amber-400';
+      if (type === 'stop') return 'text-rose-400';
+      return 'text-slate-400';
+    };
+
+    return (
+      <div className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-2 animate-in fade-in duration-200" onClick={() => setShowSessionsModal(false)}>
+        <div className="bg-slate-900 rounded-2xl w-full max-w-md max-h-[85vh] overflow-hidden flex flex-col border border-slate-700/50 shadow-2xl" onClick={e => e.stopPropagation()}>
+          {/* Header */}
+          <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between sticky top-0 bg-slate-900 z-10">
+            <div>
+              <h3 className="text-base font-bold text-white">📋 Oturum Detayı</h3>
+              <p className="text-[11px] text-slate-400">{sessionsModalDate}</p>
+            </div>
+            <button onClick={() => setShowSessionsModal(false)} className="text-slate-400 hover:text-white p-1.5 rounded-lg bg-slate-800/60">
+              <X size={16} />
+            </button>
+          </div>
+
+          {/* Content */}
+          <div className="flex-1 overflow-y-auto p-3">
+            {sessionsLoading && <div className="text-center text-slate-500 py-8 text-sm">Yükleniyor...</div>}
+            
+            {!sessionsLoading && events.length === 0 && (
+              <div className="text-center text-slate-500 py-8 text-sm">
+                Bu güne ait kayıt yok
+              </div>
+            )}
+
+            {!sessionsLoading && events.length > 0 && (
+              <>
+                {/* Özet */}
+                <div className="bg-slate-800/40 rounded-xl p-3 mb-3 flex items-center justify-between">
+                  <div>
+                    <div className="text-[10px] text-slate-500">Toplam Çalışma</div>
+                    <div className="text-lg font-bold text-emerald-400">{fmtDur(totalWork)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-500">Oturum</div>
+                    <div className="text-lg font-bold text-blue-400">{groups.length}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-500">Event</div>
+                    <div className="text-lg font-bold text-violet-400">{events.length}</div>
+                  </div>
+                </div>
+
+                {/* Oturumlar */}
+                {groups.map((g, gi) => (
+                  <div key={gi} className="mb-3 border border-slate-700/30 rounded-xl overflow-hidden">
+                    <div className="bg-slate-800/50 px-3 py-2 flex items-center justify-between">
+                      <div className="text-xs font-bold text-white">
+                        Oturum {gi + 1}
+                        {g.start && <span className="text-slate-400 font-normal ml-2">{fmtTime(g.start.ts)} başladı</span>}
+                      </div>
+                      <span className="text-xs font-mono text-emerald-400">{fmtDur(g.durationSec)}</span>
+                    </div>
+                    <div className="divide-y divide-slate-800/40">
+                      {g.events.map((e: any) => (
+                        <div key={e.event_id} className="px-3 py-1.5 flex items-center justify-between text-[11px] hover:bg-slate-800/30">
+                          <div className="flex items-center gap-2">
+                            <span className="text-slate-500 font-mono w-14">{fmtTime(e.ts)}</span>
+                            <span className={eventColor(e.type)}>{eventLabel(e.type)}</span>
+                          </div>
+                          <button
+                            onClick={async () => {
+                              if (!window.confirm('Bu kaydı sil?')) return;
+                              try {
+                                const token = await user!.getIdToken();
+                                const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+                                await fetch(`${BASE}/study/delete-event`, {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                  body: JSON.stringify({ event_id: e.event_id }),
+                                });
+                                openSessionsModal(sessionsModalDate);
+                              } catch {}
+                            }}
+                            className="text-rose-400 hover:text-rose-300 opacity-50 hover:opacity-100"
+                            title="Bu eventi sil"
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+
+          {/* Footer — gün silme + manuel düzeltme */}
+          <div className="border-t border-slate-800 p-3 space-y-2 bg-slate-950/40">
+            <button
+              onClick={async () => {
+                const newSec = window.prompt(
+                  `Bu gün için doğru toplam süreyi gir (saniye cinsinden, örn 7200 = 2 saat):\n\nMevcut hata varsa düzeltebilirsin.`,
+                  '0'
+                );
+                if (newSec === null) return;
+                const sec = parseInt(newSec);
+                if (isNaN(sec) || sec < 0) return;
+                try {
+                  const token = await user!.getIdToken();
+                  const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+                  await fetch(`${BASE}/study/set-daily`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ date: sessionsModalDate, total_seconds: sec }),
+                  });
+                  // Local history güncelle
+                  setStudyHistory(prev => prev.map(h => h.date === sessionsModalDate ? { ...h, totalSeconds: sec } : h));
+                  setShowSessionsModal(false);
+                } catch {}
+              }}
+              className="w-full bg-amber-700 hover:bg-amber-600 text-white text-xs font-bold py-2 rounded-lg"
+            >✏️ Toplam Süreyi Düzelt</button>
+            <button
+              onClick={async () => {
+                if (!window.confirm(`${sessionsModalDate} gününün TÜM kayıtları silinecek. Emin misin?`)) return;
+                try {
+                  const token = await user!.getIdToken();
+                  const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+                  await fetch(`${BASE}/study/delete-day`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ date: sessionsModalDate }),
+                  });
+                  setStudyHistory(prev => prev.filter(h => h.date !== sessionsModalDate));
+                  // Eğer bugünse local state'i de sıfırla
+                  if (sessionsModalDate === todayStr()) {
+                    setStudyState(s => ({
+                      ...s,
+                      phase: 'idle', phaseStartedAt: 0, accumulatedInPhase: 0,
+                      completedWorkBlocks: 0, todayTotalSeconds: 0,
+                    }));
+                  }
+                  setShowSessionsModal(false);
+                } catch {}
+              }}
+              className="w-full bg-rose-700 hover:bg-rose-600 text-white text-xs font-bold py-2 rounded-lg"
+            >🗑 Bu Günün TÜM Kayıtlarını Sil</button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderPageGoalModal = () => {
     if (!showPageGoalModal) return null;
     const presets = [10, 20, 30, 50, 75, 100];
@@ -8213,7 +8442,7 @@ export default function App() {
                         const heightPct = (d.totalSeconds / chartMax) * 100;
                         const isToday = i === 6;
                         return (
-                          <div key={d.date} className="flex-1 flex flex-col items-center gap-0.5 group">
+                          <button key={d.date} onClick={() => openSessionsModal(d.date)} className="flex-1 flex flex-col items-center gap-0.5 group cursor-pointer focus:outline-none">
                             <div className="text-[8px] text-slate-400 font-mono opacity-0 group-hover:opacity-100 transition-opacity h-3">
                               {d.totalSeconds > 0 ? formatHMS(d.totalSeconds) : ''}
                             </div>
@@ -8225,11 +8454,10 @@ export default function App() {
                                   d.totalSeconds > goalSec * 0.3 ? 'bg-gradient-to-t from-amber-600 to-amber-400' :
                                   d.totalSeconds > 0 ? 'bg-gradient-to-t from-rose-600 to-rose-400' : 
                                   'bg-slate-700/40'
-                                } ${isToday ? 'ring-2 ring-white/30' : ''}`}
+                                } ${isToday ? 'ring-2 ring-white/30' : ''} group-hover:opacity-80`}
                                 style={{ height: `${Math.max(2, heightPct)}%` }}
-                                title={`${d.dayLabel}: ${formatHMS(d.totalSeconds)}`}
+                                title={`${d.dayLabel}: ${formatHMS(d.totalSeconds)} — tıkla detay`}
                               />
-                              {/* Saat sayısı bar üstünde her zaman */}
                               {d.totalSeconds > 0 && (
                                 <div
                                   className="absolute left-0 right-0 text-center text-[8px] font-bold text-white/90 pointer-events-none"
@@ -8245,7 +8473,7 @@ export default function App() {
                             <div className={`text-[8px] ${isToday ? 'text-blue-400 font-bold' : 'text-slate-600'}`}>
                               {parseInt(d.date.split('-')[2])}
                             </div>
-                          </div>
+                          </button>
                         );
                       })}
                     </div>
@@ -8544,11 +8772,15 @@ export default function App() {
           {/* Bugünü manuel sıfırla — yanlış data toplamışsa */}
           {studyState.phase === 'idle' && studyState.todayTotalSeconds > 0 && (
             <div className="bg-rose-950/20 border border-rose-700/30 rounded-2xl p-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="text-xs font-bold text-rose-300">⚠️ Bugünü Sıfırla</div>
-                  <div className="text-[10px] text-rose-200/60">Toplam yanlış görünüyorsa</div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-bold text-rose-300">⚠️ Bugünkü Sayaç</div>
+                  <div className="text-[10px] text-rose-200/60">{formatHMS(studyState.todayTotalSeconds)} kayıtlı</div>
                 </div>
+                <button
+                  onClick={() => openSessionsModal(todayStr())}
+                  className="bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg flex-shrink-0"
+                >📋 Detay</button>
                 <button
                   onClick={async () => {
                     if (window.confirm('Bugünkü tüm sayaç verisi sıfırlanacak. Devam edilsin mi?')) {
@@ -8562,14 +8794,12 @@ export default function App() {
                         todayTotalSeconds: 0,
                         todayDate: today,
                       }));
-                      // history'den de bugünü çıkar
                       setStudyHistory(prev => prev.filter(h => h.date !== today));
-                      // Sunucuya da bildir
                       if (user) {
                         try {
                           const token = await user.getIdToken();
                           const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
-                          await fetch(`${BASE}/study/reset-today`, {
+                          await fetch(`${BASE}/study/delete-day`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
                             body: JSON.stringify({ date: today }),
@@ -8578,7 +8808,7 @@ export default function App() {
                       }
                     }
                   }}
-                  className="bg-rose-700 hover:bg-rose-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg"
+                  className="bg-rose-700 hover:bg-rose-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg flex-shrink-0"
                 >Sıfırla</button>
               </div>
             </div>
@@ -10426,6 +10656,7 @@ export default function App() {
       {renderNoteModal()}
       {renderQuestionCropModal()}
       {renderPageGoalModal()}
+      {renderSessionsModal()}
       {renderNoteLayoutBuilder()}
       {renderNoteReview()}
       {renderAddMemorizeModal()}

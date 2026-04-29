@@ -35,7 +35,7 @@ type Mode = 'setup' | 'taking' | 'grading' | 'results' | 'saved_questions' | 'sa
 // ═══════════════════════════════════════════════════════════════════════
 // ⏱ ÇALIŞMA SAYACI — Types
 // ═══════════════════════════════════════════════════════════════════════
-type StudyMode = 'pomodoro' | 'desktime' | 'deepwork' | 'flexible';
+type StudyMode = 'pomodoro' | 'pomodoro_long' | 'desktime' | 'deepwork' | 'flowtime' | 'cornell50' | 'flexible';
 type StudyPhase = 'idle' | 'working' | 'break' | 'paused';
 
 interface StudyPreset {
@@ -47,17 +47,39 @@ interface StudyPreset {
   longBreakMin: number;
   longBreakEvery: number;
   description: string;
+  scientific?: string; // Bilimsel kaynak/açıklama
+  bestFor?: string;    // Kim için ideal
 }
 
 const STUDY_PRESETS: StudyPreset[] = [
-  { id: 'pomodoro', name: 'Pomodoro', icon: '🍅', workMin: 25, breakMin: 5, longBreakMin: 30, longBreakEvery: 4,
-    description: 'Klasik 25/5 — yeni başlayanlar ve dağılmış dikkate ideal (Cirillo, 1980)' },
-  { id: 'desktime', name: 'DeskTime', icon: '⚡', workMin: 52, breakMin: 17, longBreakMin: 30, longBreakEvery: 4,
-    description: 'En verimli %10\'un tekniği — orta zorluk (DeskTime, 2014)' },
-  { id: 'deepwork', name: 'Deep Work', icon: '🧠', workMin: 90, breakMin: 20, longBreakMin: 45, longBreakEvery: 2,
-    description: 'Ultradian ritim — derin odaklanma, KPSS için ideal (Schwartz/Newport)' },
+  { id: 'pomodoro', name: 'Pomodoro 25/5', icon: '🍅', workMin: 25, breakMin: 5, longBreakMin: 30, longBreakEvery: 4,
+    description: 'Klasik 25 dk çalışma + 5 dk mola',
+    scientific: 'Francesco Cirillo (1987) — kısa odaklanma ile yorgunluk önler. ADHD\'li öğrencilerde verimli (Cassidy ve ark., 2018).',
+    bestFor: 'Yeni başlayanlar, dağınık dikkat, zor konular' },
+  { id: 'pomodoro_long', name: 'Pomodoro 50/10', icon: '🍅', workMin: 50, breakMin: 10, longBreakMin: 30, longBreakEvery: 3,
+    description: 'Genişletilmiş 50/10 — derinleşmek için',
+    scientific: 'Cornell çalışma yöntemi — 50 dk uzun konsantrasyon + 10 dk dinlenme = beyin glikoz seviyesi optimum (Walker, 2017).',
+    bestFor: 'Konuya hâkim olanlar, paragraf okuma, problem çözme' },
+  { id: 'desktime', name: 'DeskTime 52/17', icon: '⚡', workMin: 52, breakMin: 17, longBreakMin: 30, longBreakEvery: 4,
+    description: '52 dk yoğun + 17 dk dinlenme',
+    scientific: 'DeskTime şirketi 2014 araştırması — en verimli %10\'un kullandığı zaman dilimi. Üretkenlik 27% artırır (Gifford, 2014).',
+    bestFor: 'Beyaz yaka çalışanlar, uzun odaklanma alışkanlığı olanlar' },
+  { id: 'deepwork', name: 'Deep Work 90/20', icon: '🧠', workMin: 90, breakMin: 20, longBreakMin: 45, longBreakEvery: 2,
+    description: 'Ultradian ritim 90 dk + 20 dk',
+    scientific: 'Beyin Ultradian Ritim teorisi — Tony Schwartz (2011), Cal Newport (2016). Vücut doğal 90 dk döngüsünde çalışır. KPSS için ideal.',
+    bestFor: 'Sınava hazırlık, kompleks konu çalışma, uzman çalışanlar' },
+  { id: 'flowtime', name: 'Flowtime', icon: '🌊', workMin: 999, breakMin: 999, longBreakMin: 999, longBreakEvery: 99,
+    description: 'Akış halinde — sen mola al',
+    scientific: 'Mihály Csíkszentmihályi Flow teorisi (1990) — akış halindeyken zaman algısı kaybolur, kesintiye karşı duyarlı. Sayaç sadece ölçer.',
+    bestFor: 'Yaratıcı iş, kompozisyon, programlama, akışta hissedenler' },
+  { id: 'cornell50', name: 'Time Blocking', icon: '📅', workMin: 60, breakMin: 15, longBreakMin: 30, longBreakEvery: 3,
+    description: '60 dk blok + 15 dk değerlendirme',
+    scientific: 'Cal Newport "Deep Work" — saat bazlı bloklar. Görev arası geçiş maliyeti %40 azalır (Mark ve ark., 2008).',
+    bestFor: 'Çoklu konu, planlı çalışma, günlük program kuranlar' },
   { id: 'flexible', name: 'Esnek', icon: '🎯', workMin: 999, breakMin: 10, longBreakMin: 20, longBreakEvery: 4,
-    description: 'Süre sınırı yok — sen karar ver, mola istediğinde al' },
+    description: 'Süre sınırı yok — sen karar ver',
+    scientific: 'Self-paced learning — kendi temposunda çalışma stresi azaltır (Sweller, 1988).',
+    bestFor: 'Kontrol seven, deneyimli, kendi temposunu bilenler' },
 ];
 
 interface StudySession {
@@ -1897,6 +1919,8 @@ export default function App() {
   const [sessionsModalDate, setSessionsModalDate] = useState<string>(''); // '' = bugün
   const [sessionsList, setSessionsList] = useState<any[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState<boolean>(false);
+  const [editingDailyMinutes, setEditingDailyMinutes] = useState<string>('');
+  const [showEditDaily, setShowEditDaily] = useState<boolean>(false);
   const [pageGoalInput, setPageGoalInput] = useState<string>('');
   // FIX: Not kategorisi seçimi (not kesme modalında)
   const [noteCropCategory, setNoteCropCategory] = useState<'onemli' | 'ornek' | 'tanim' | 'formul' | 'diger'>('onemli');
@@ -6272,28 +6296,69 @@ export default function App() {
     const events = sessionsList;
     
     // Eventleri oturumlara grupla — start..stop arasi
-    type SessionGroup = { start?: any; events: any[]; durationSec: number; };
+    // Her event'e duration ekliyoruz (önceki event'ten bu event'e kadar geçen süre)
+    type EventWithMeta = any & { durationFromPrev?: number };
+    type SessionGroup = { start?: any; events: EventWithMeta[]; workSec: number; pauseSec: number; breakSec: number; };
     const groups: SessionGroup[] = [];
     let current: SessionGroup | null = null;
     let lastWorkStart = 0;
+    let lastPauseStart = 0;
+    let lastBreakStart = 0;
     let totalWork = 0;
+    let totalPause = 0;
+    let totalBreak = 0;
     
-    for (const e of events) {
+    for (let i = 0; i < events.length; i++) {
+      const e = events[i] as EventWithMeta;
+      const prev = events[i - 1];
+      if (prev) e.durationFromPrev = Math.max(0, Math.floor((e.ts - prev.ts) / 1000));
+      
       if (e.type === 'start') {
         if (current) groups.push(current);
-        current = { start: e, events: [e], durationSec: 0 };
+        current = { start: e, events: [e], workSec: 0, pauseSec: 0, breakSec: 0 };
         lastWorkStart = e.ts;
       } else {
-        if (!current) current = { events: [], durationSec: 0 };
+        if (!current) current = { events: [], workSec: 0, pauseSec: 0, breakSec: 0 };
         current.events.push(e);
-        if (e.type === 'pause' || e.type === 'break_start' || e.type === 'stop') {
+        
+        if (e.type === 'pause') {
           if (lastWorkStart > 0) {
             const sec = Math.max(0, Math.floor((e.ts - lastWorkStart) / 1000));
+            current.workSec += sec;
             totalWork += sec;
-            current.durationSec += sec;
             lastWorkStart = 0;
           }
-        } else if (e.type === 'resume_from_pause' || e.type === 'resume_after_break') {
+          lastPauseStart = e.ts;
+        } else if (e.type === 'break_start') {
+          if (lastWorkStart > 0) {
+            const sec = Math.max(0, Math.floor((e.ts - lastWorkStart) / 1000));
+            current.workSec += sec;
+            totalWork += sec;
+            lastWorkStart = 0;
+          }
+          lastBreakStart = e.ts;
+        } else if (e.type === 'stop') {
+          if (lastWorkStart > 0) {
+            const sec = Math.max(0, Math.floor((e.ts - lastWorkStart) / 1000));
+            current.workSec += sec;
+            totalWork += sec;
+            lastWorkStart = 0;
+          }
+        } else if (e.type === 'resume_from_pause') {
+          if (lastPauseStart > 0) {
+            const sec = Math.max(0, Math.floor((e.ts - lastPauseStart) / 1000));
+            current.pauseSec += sec;
+            totalPause += sec;
+            lastPauseStart = 0;
+          }
+          lastWorkStart = e.ts;
+        } else if (e.type === 'resume_after_break') {
+          if (lastBreakStart > 0) {
+            const sec = Math.max(0, Math.floor((e.ts - lastBreakStart) / 1000));
+            current.breakSec += sec;
+            totalBreak += sec;
+            lastBreakStart = 0;
+          }
           lastWorkStart = e.ts;
         }
       }
@@ -6313,9 +6378,9 @@ export default function App() {
       const map: Record<string,string> = {
         'start': '▶️ Başlat',
         'pause': '⏸ Duraklat',
-        'resume_from_pause': '▶️ Devam (duraklatıldı)',
+        'resume_from_pause': '▶️ Duraklatmadan dön',
         'break_start': '☕ Mola',
-        'resume_after_break': '▶️ Çalışmaya dön',
+        'resume_after_break': '▶️ Moladan dön',
         'stop': '⏹ Bitir',
       };
       return map[type] || type;
@@ -6326,6 +6391,19 @@ export default function App() {
       if (type === 'break_start') return 'text-amber-400';
       if (type === 'stop') return 'text-rose-400';
       return 'text-slate-400';
+    };
+    // Bir event'in "açıklama" verir — önceki event'ten ne kadar geçti
+    const eventDescription = (e: any, prev: any) => {
+      if (!prev || !e.durationFromPrev) return null;
+      const dur = fmtDur(e.durationFromPrev);
+      if (e.type === 'pause' && prev.type === 'start') return `${dur} çalıştı`;
+      if (e.type === 'pause' && prev.type === 'resume_from_pause') return `${dur} çalıştı`;
+      if (e.type === 'pause' && prev.type === 'resume_after_break') return `${dur} çalıştı`;
+      if (e.type === 'resume_from_pause') return `${dur} duraklatıldı`;
+      if (e.type === 'break_start' && (prev.type === 'start' || prev.type.startsWith('resume'))) return `${dur} çalıştı`;
+      if (e.type === 'resume_after_break') return `${dur} mola yapıldı`;
+      if (e.type === 'stop' && prev.type !== 'pause' && prev.type !== 'break_start') return `${dur} çalıştı`;
+      return null;
     };
 
     return (
@@ -6354,19 +6432,23 @@ export default function App() {
 
             {!sessionsLoading && events.length > 0 && (
               <>
-                {/* Özet */}
-                <div className="bg-slate-800/40 rounded-xl p-3 mb-3 flex items-center justify-between">
-                  <div>
-                    <div className="text-[10px] text-slate-500">Toplam Çalışma</div>
-                    <div className="text-lg font-bold text-emerald-400">{fmtDur(totalWork)}</div>
+                {/* Özet — 4 metrik */}
+                <div className="grid grid-cols-2 gap-2 mb-3">
+                  <div className="bg-emerald-950/30 border border-emerald-700/30 rounded-xl p-2.5">
+                    <div className="text-[9px] text-emerald-300">▶️ Çalışma</div>
+                    <div className="text-base font-bold text-emerald-400">{fmtDur(totalWork)}</div>
                   </div>
-                  <div>
-                    <div className="text-[10px] text-slate-500">Oturum</div>
-                    <div className="text-lg font-bold text-blue-400">{groups.length}</div>
+                  <div className="bg-amber-950/30 border border-amber-700/30 rounded-xl p-2.5">
+                    <div className="text-[9px] text-amber-300">☕ Mola</div>
+                    <div className="text-base font-bold text-amber-400">{fmtDur(totalBreak)}</div>
                   </div>
-                  <div>
-                    <div className="text-[10px] text-slate-500">Event</div>
-                    <div className="text-lg font-bold text-violet-400">{events.length}</div>
+                  <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-2.5">
+                    <div className="text-[9px] text-slate-400">⏸ Duraklatma</div>
+                    <div className="text-base font-bold text-slate-300">{fmtDur(totalPause)}</div>
+                  </div>
+                  <div className="bg-blue-950/30 border border-blue-700/30 rounded-xl p-2.5">
+                    <div className="text-[9px] text-blue-300">📊 Oturum</div>
+                    <div className="text-base font-bold text-blue-400">{groups.length} <span className="text-[9px] font-normal text-slate-400">({events.length} kayıt)</span></div>
                   </div>
                 </div>
 
@@ -6378,36 +6460,47 @@ export default function App() {
                         Oturum {gi + 1}
                         {g.start && <span className="text-slate-400 font-normal ml-2">{fmtTime(g.start.ts)} başladı</span>}
                       </div>
-                      <span className="text-xs font-mono text-emerald-400">{fmtDur(g.durationSec)}</span>
+                      <div className="flex items-center gap-2 text-[10px]">
+                        <span className="text-emerald-400 font-mono font-bold">▶ {fmtDur(g.workSec)}</span>
+                        {g.breakSec > 0 && <span className="text-amber-400 font-mono">☕ {fmtDur(g.breakSec)}</span>}
+                        {g.pauseSec > 0 && <span className="text-slate-400 font-mono">⏸ {fmtDur(g.pauseSec)}</span>}
+                      </div>
                     </div>
                     <div className="divide-y divide-slate-800/40">
-                      {g.events.map((e: any) => (
-                        <div key={e.event_id} className="px-3 py-1.5 flex items-center justify-between text-[11px] hover:bg-slate-800/30">
-                          <div className="flex items-center gap-2">
-                            <span className="text-slate-500 font-mono w-14">{fmtTime(e.ts)}</span>
-                            <span className={eventColor(e.type)}>{eventLabel(e.type)}</span>
+                      {g.events.map((e: any, ei: number) => {
+                        const prev = ei > 0 ? g.events[ei - 1] : null;
+                        const desc = eventDescription(e, prev);
+                        return (
+                          <div key={e.event_id} className="px-3 py-1.5 flex items-center justify-between text-[11px] hover:bg-slate-800/30">
+                            <div className="flex items-center gap-2 flex-1 min-w-0">
+                              <span className="text-slate-500 font-mono w-14 flex-shrink-0">{fmtTime(e.ts)}</span>
+                              <span className={`${eventColor(e.type)} flex-shrink-0`}>{eventLabel(e.type)}</span>
+                              {desc && (
+                                <span className="text-[10px] text-slate-500 italic truncate">— {desc}</span>
+                              )}
+                            </div>
+                            <button
+                              onClick={async () => {
+                                if (!window.confirm('Bu kaydı sil?')) return;
+                                try {
+                                  const token = await user!.getIdToken();
+                                  const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+                                  await fetch(`${BASE}/study/delete-event`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                    body: JSON.stringify({ event_id: e.event_id }),
+                                  });
+                                  openSessionsModal(sessionsModalDate);
+                                } catch {}
+                              }}
+                              className="text-rose-400 hover:text-rose-300 opacity-50 hover:opacity-100 flex-shrink-0"
+                              title="Bu eventi sil"
+                            >
+                              <Trash2 size={11} />
+                            </button>
                           </div>
-                          <button
-                            onClick={async () => {
-                              if (!window.confirm('Bu kaydı sil?')) return;
-                              try {
-                                const token = await user!.getIdToken();
-                                const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
-                                await fetch(`${BASE}/study/delete-event`, {
-                                  method: 'POST',
-                                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                  body: JSON.stringify({ event_id: e.event_id }),
-                                });
-                                openSessionsModal(sessionsModalDate);
-                              } catch {}
-                            }}
-                            className="text-rose-400 hover:text-rose-300 opacity-50 hover:opacity-100"
-                            title="Bu eventi sil"
-                          >
-                            <Trash2 size={11} />
-                          </button>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 ))}
@@ -6417,30 +6510,70 @@ export default function App() {
 
           {/* Footer — gün silme + manuel düzeltme */}
           <div className="border-t border-slate-800 p-3 space-y-2 bg-slate-950/40">
-            <button
-              onClick={async () => {
-                const newSec = window.prompt(
-                  `Bu gün için doğru toplam süreyi gir (saniye cinsinden, örn 7200 = 2 saat):\n\nMevcut hata varsa düzeltebilirsin.`,
-                  '0'
-                );
-                if (newSec === null) return;
-                const sec = parseInt(newSec);
-                if (isNaN(sec) || sec < 0) return;
-                try {
-                  const token = await user!.getIdToken();
-                  const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
-                  await fetch(`${BASE}/study/set-daily`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                    body: JSON.stringify({ date: sessionsModalDate, total_seconds: sec }),
-                  });
-                  // Local history güncelle
-                  setStudyHistory(prev => prev.map(h => h.date === sessionsModalDate ? { ...h, totalSeconds: sec } : h));
-                  setShowSessionsModal(false);
-                } catch {}
-              }}
-              className="w-full bg-amber-700 hover:bg-amber-600 text-white text-xs font-bold py-2 rounded-lg"
-            >✏️ Toplam Süreyi Düzelt</button>
+            {showEditDaily ? (
+              <div className="bg-amber-950/40 border border-amber-700/40 rounded-lg p-2.5">
+                <div className="text-[10px] text-amber-300 font-bold mb-1.5">✏️ Toplam Süreyi Düzelt</div>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 relative">
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={1440}
+                      value={editingDailyMinutes}
+                      onChange={e => setEditingDailyMinutes(e.target.value.replace(/[^0-9]/g, ''))}
+                      placeholder="Dakika"
+                      className="w-full bg-slate-900 border border-amber-700/40 rounded-lg pl-3 pr-12 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
+                      autoFocus
+                    />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] text-slate-500">dakika</span>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      const minutes = parseInt(editingDailyMinutes) || 0;
+                      const sec = minutes * 60;
+                      try {
+                        const token = await user!.getIdToken();
+                        const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+                        await fetch(`${BASE}/study/set-daily`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                          body: JSON.stringify({ date: sessionsModalDate, total_seconds: sec }),
+                        });
+                        setStudyHistory(prev => {
+                          const exists = prev.find(h => h.date === sessionsModalDate);
+                          if (exists) return prev.map(h => h.date === sessionsModalDate ? { ...h, totalSeconds: sec } : h);
+                          return [...prev, { date: sessionsModalDate, totalSeconds: sec, workBlocks: 0, breaks: 0, mode: 'deepwork', timeline: [] }];
+                        });
+                        // Bugünse state'i de güncelle
+                        if (sessionsModalDate === todayStr()) {
+                          setStudyState(s => ({ ...s, todayTotalSeconds: sec }));
+                        }
+                        setShowEditDaily(false);
+                        setEditingDailyMinutes('');
+                      } catch {}
+                    }}
+                    className="bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold px-4 py-2 rounded-lg"
+                  >Kaydet</button>
+                  <button
+                    onClick={() => { setShowEditDaily(false); setEditingDailyMinutes(''); }}
+                    className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-3 py-2 rounded-lg"
+                  >İptal</button>
+                </div>
+                <div className="text-[9px] text-slate-500 mt-1.5">
+                  💡 Örnek: 180 → 3 saat, 90 → 1.5 saat. Mevcut: {Math.floor((studyHistory.find(h => h.date === sessionsModalDate)?.totalSeconds || 0) / 60)} dk
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  const current = Math.floor((studyHistory.find(h => h.date === sessionsModalDate)?.totalSeconds || 0) / 60);
+                  setEditingDailyMinutes(String(current));
+                  setShowEditDaily(true);
+                }}
+                className="w-full bg-amber-700 hover:bg-amber-600 text-white text-xs font-bold py-2 rounded-lg"
+              >✏️ Toplam Süreyi Düzelt (dakika)</button>
+            )}
             <button
               onClick={async () => {
                 if (!window.confirm(`${sessionsModalDate} gününün TÜM kayıtları silinecek. Emin misin?`)) return;
@@ -8612,28 +8745,52 @@ export default function App() {
           {/* Mod seçimi */}
           {studyState.phase === 'idle' && (
             <div className="bg-slate-800/40 border border-slate-700/30 rounded-2xl p-4">
-              <h3 className="text-sm font-bold text-slate-200 mb-3">⚙️ Çalışma Modu</h3>
-              <div className="grid grid-cols-2 gap-2">
-                {STUDY_PRESETS.map(p => (
-                  <button
-                    key={p.id}
-                    onClick={() => setStudyState(s => ({ ...s, mode: p.id }))}
-                    className={`text-left rounded-xl p-3 border transition-all ${
-                      studyState.mode === p.id
-                        ? 'bg-blue-600/20 border-blue-500/40 ring-1 ring-blue-500/40'
-                        : 'bg-slate-900/40 border-slate-700/30 hover:border-slate-600/50'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 mb-1">
-                      <span className="text-lg">{p.icon}</span>
-                      <span className="text-xs font-bold text-white">{p.name}</span>
-                    </div>
-                    <div className="text-[10px] text-slate-400 mb-1">
-                      {p.id === 'flexible' ? 'Sınırsız süre' : `${p.workMin}/${p.breakMin} dk`}
-                    </div>
-                    <div className="text-[9px] text-slate-500 leading-tight">{p.description}</div>
-                  </button>
-                ))}
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-bold text-slate-200">⚙️ Çalışma Modu</h3>
+                <span className="text-[9px] text-slate-500">{STUDY_PRESETS.find(p => p.id === studyState.mode)?.name}</span>
+              </div>
+              <div className="space-y-2">
+                {STUDY_PRESETS.map(p => {
+                  const isSelected = studyState.mode === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => setStudyState(s => ({ ...s, mode: p.id }))}
+                      className={`w-full text-left rounded-xl p-3 border transition-all ${
+                        isSelected
+                          ? 'bg-gradient-to-br from-blue-600/20 to-violet-600/10 border-blue-500/40 ring-1 ring-blue-500/40 shadow-lg shadow-blue-900/20'
+                          : 'bg-slate-900/40 border-slate-700/30 hover:border-slate-600/50'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <span className="text-2xl flex-shrink-0">{p.icon}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-2 mb-0.5">
+                            <span className="text-sm font-bold text-white truncate">{p.name}</span>
+                            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${isSelected ? 'bg-blue-500/30 text-blue-300' : 'bg-slate-800 text-slate-400'} whitespace-nowrap`}>
+                              {p.id === 'flowtime' ? 'Akış' : p.id === 'flexible' ? '∞' : `${p.workMin}/${p.breakMin}dk`}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-300 mb-1">{p.description}</div>
+                          {isSelected && (
+                            <>
+                              {p.scientific && (
+                                <div className="text-[10px] text-slate-400 leading-snug mt-2 bg-slate-950/40 rounded-md p-2 border border-slate-800/50">
+                                  📚 <span className="text-slate-300">{p.scientific}</span>
+                                </div>
+                              )}
+                              {p.bestFor && (
+                                <div className="text-[10px] text-emerald-400/90 mt-1.5">
+                                  ✓ {p.bestFor}
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -8832,17 +8989,18 @@ export default function App() {
                     {last30.map((d, i) => {
                       const isToday = d.date === todayKey;
                       return (
-                        <div
+                        <button
                           key={d.date}
-                          className={`aspect-square rounded ${intensity(d.totalSeconds)} ${isToday ? 'ring-2 ring-white' : ''} relative group cursor-help`}
-                          title={`${d.day}/${d.month}: ${formatHMS(d.totalSeconds)}`}
+                          onClick={() => openSessionsModal(d.date)}
+                          className={`aspect-square rounded ${intensity(d.totalSeconds)} ${isToday ? 'ring-2 ring-white' : ''} relative group cursor-pointer hover:scale-110 hover:z-10 transition-transform focus:outline-none`}
+                          title={`${d.day}/${d.month}: ${formatHMS(d.totalSeconds)} — tıkla detay`}
                         >
                           <div className="absolute inset-0 flex items-center justify-center">
                             <span className={`text-[9px] font-bold ${d.totalSeconds > 0 ? 'text-white' : 'text-slate-600'}`}>
                               {d.day}
                             </span>
                           </div>
-                        </div>
+                        </button>
                       );
                     })}
                   </div>

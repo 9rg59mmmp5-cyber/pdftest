@@ -30,7 +30,7 @@ const OPTIMAL_DPR = (() => {
   return Math.min(2, Math.max(1.5, dpr));
 })();
 
-type Mode = 'setup' | 'taking' | 'grading' | 'results' | 'saved_questions' | 'saved_notes' | 'memorize' | 'ustasi' | 'analiz' | 'calisma';
+type Mode = 'setup' | 'taking' | 'grading' | 'results' | 'saved_questions' | 'saved_notes' | 'memorize' | 'ustasi' | 'analiz' | 'calisma' | 'atolye';
 
 // ═══════════════════════════════════════════════════════════════════════
 // ⏱ ÇALIŞMA SAYACI — Types
@@ -116,6 +116,9 @@ interface SavedQuestion {
   pdfId?: string;
   page?: number;
   rect?: { x: number, y: number, width: number, height: number };
+  // Kaynak tipi — Bölüm Denemesi/Çıkmış Soru özel önem alır
+  sourceType?: 'kitap' | 'bolum_denemesi' | 'cikmis_soru' | 'deneme_sinavi';
+  examName?: string; // Hangi deneme/sınav (örn "ÖSYM 2023", "Hocam Yayınları Türkçe Deneme 1")
   // ── SM-2 bilimsel tekrar alanları ──────────────────────────────────────
   srsNextReview?: number;         // Sonraki tekrar zamanı (ms timestamp)
   srsReviewCount?: number;        // Kaç kez tekrar edildi
@@ -123,9 +126,9 @@ interface SavedQuestion {
   srsIntervalDays?: number;       // Sonraki aralık (gün)
   srsLapses?: number;             // Kaç kez yanlış bilindi
   srsLastReviewedAt?: number;     // Son tekrar zamanı
-  srsStage?: 'new' | 'learning' | 'review' | 'mature' | 'mastered';  // Öğrenme aşaması
-  srsCorrectStreak?: number;      // Üst üste doğru bilme sayısı (otomatik zorluk için)
-  srsWrongStreak?: number;        // Üst üste yanlış sayısı
+  srsStage?: 'new' | 'learning' | 'review' | 'mature' | 'mastered';
+  srsCorrectStreak?: number;
+  srsWrongStreak?: number;
 }
 
 interface QuestionReviewStats {
@@ -745,6 +748,8 @@ export default function App() {
   const [cropSubject, setCropSubject] = useState<string>(SUBJECTS[0]);
   const [cropTopic, setCropTopic] = useState<string>('');
   const [lastTopicBySubject, setLastTopicBySubject] = useState<Record<string, string>>({});
+  // Sorular sayfası kaynak filtresi
+  const [qSourceFilter, setQSourceFilter] = useState<'all' | 'kitap' | 'bolum_denemesi' | 'cikmis_soru' | 'deneme_sinavi' | 'special'>('all');
   const [showTestBuilderModal, setShowTestBuilderModal] = useState<boolean>(false);
   const [showNoteLayoutBuilder, setShowNoteLayoutBuilder] = useState<boolean>(false);
   const [noteLayoutSelected, setNoteLayoutSelected] = useState<Set<string>>(new Set());
@@ -3560,7 +3565,38 @@ export default function App() {
     const shuffledExtra = [...extraErrors].sort(() => Math.random() - 0.5);
     const shuffledNew = [...newToAdd].sort(() => Math.random() - 0.5);
 
-    return [...shuffledDue, ...shuffledExtra, ...shuffledNew];
+    // ── ÖNEMLİ KAYNAK ÖNCELIĞI ─────────────────────────────────────────
+    // Bölüm denemesi/Çıkmış/Deneme sınavı soruları — başa al, bir kısmını çift göster
+    // (ağırlıklı tekrar)
+    const sourceWeight = (q: SavedQuestion): number => {
+      if (q.sourceType === 'cikmis_soru') return 2.0;     // %100 daha fazla
+      if (q.sourceType === 'deneme_sinavi') return 1.8;   // %80 daha fazla
+      if (q.sourceType === 'bolum_denemesi') return 1.5;  // %50 daha fazla
+      return 1.0;
+    };
+    
+    // Önemli kaynakların due'larını başa koy + bir kısmını duplicate
+    const allQueued = [...shuffledDue, ...shuffledExtra, ...shuffledNew];
+    const priorityQueue: SavedQuestion[] = [];
+    const normalQueue: SavedQuestion[] = [];
+    for (const q of allQueued) {
+      const w = sourceWeight(q);
+      if (w > 1) priorityQueue.push(q);
+      else normalQueue.push(q);
+    }
+    
+    // Priority queue'yu zenginleştir — ağırlıklarına göre tekrar ekle
+    const enrichedPriority: SavedQuestion[] = [];
+    for (const q of priorityQueue) {
+      const w = sourceWeight(q);
+      enrichedPriority.push(q);
+      // Ek olarak ağırlık - 1 oranında tekrar ekle (rastgele yere konacak)
+      if (Math.random() < (w - 1)) {
+        enrichedPriority.push(q);
+      }
+    }
+    
+    return [...enrichedPriority.sort(() => Math.random() - 0.5), ...normalQueue];
   };
 
   const startUstasi = () => {
@@ -4072,6 +4108,14 @@ export default function App() {
               <span className="text-base leading-none">⏱</span>
               <span className="text-xs font-medium tracking-wide">Çalışma</span>
               {studyState.phase === 'working' && <span className="text-[9px] bg-emerald-600 text-white px-1.5 py-0.5 rounded-full font-bold">ON</span>}
+            </button>
+            <button
+              onClick={() => setMode('atolye')}
+              className="px-2.5 py-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 rounded-lg transition-all flex items-center gap-1.5 border border-transparent hover:border-purple-700/50"
+              title="Bilimsel öğrenme teknikleri"
+            >
+              <span className="text-base leading-none">🎓</span>
+              <span className="text-xs font-medium tracking-wide">Atölye</span>
             </button>
             <button
               onClick={() => { setShowTrackingModal(true); loadTrackingData(); }}
@@ -6872,7 +6916,34 @@ export default function App() {
               <textarea
                 id="crop-notes"
                 placeholder="Soruyla ilgili notlarınız..."
-                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-blue-500 resize-none h-24"
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-blue-500 resize-none h-20"
+              />
+            </div>
+
+            {/* Kaynak Tipi — Bölüm Denemesi/Çıkmış Soru özel önem */}
+            <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-3">
+              <label className="block text-sm font-bold text-violet-300 mb-2">📖 Kaynak Tipi</label>
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                {[
+                  { id: 'kitap', label: '📚 Kitap', desc: 'Konu çalışması' },
+                  { id: 'bolum_denemesi', label: '📝 Bölüm Denemesi', desc: 'Önemli — sık tekrar' },
+                  { id: 'cikmis_soru', label: '⭐ Çıkmış Soru', desc: 'Çok önemli — en sık' },
+                  { id: 'deneme_sinavi', label: '🎯 Deneme Sınavı', desc: 'Kritik öncelik' },
+                ].map(src => (
+                  <label key={src.id} className="cursor-pointer">
+                    <input type="radio" name="crop-source-type" value={src.id} defaultChecked={src.id === 'kitap'} className="sr-only peer" />
+                    <div className="rounded-lg p-2 border-2 border-slate-700/50 peer-checked:border-violet-500 peer-checked:bg-violet-950/40 transition-all">
+                      <div className="text-xs font-bold text-white">{src.label}</div>
+                      <div className="text-[9px] text-slate-400 mt-0.5">{src.desc}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+              <input
+                id="crop-exam-name"
+                type="text"
+                placeholder="Hangi deneme/sınav? (örn: ÖSYM 2024, Hocam Yayınları Test 5)"
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
               />
             </div>
           </div>
@@ -6891,6 +6962,9 @@ export default function App() {
                 const difficulty = (document.getElementById('crop-difficulty') as HTMLSelectElement).value as 'Kolay' | 'Orta' | 'Zor';
                 const correctAnswer = (document.getElementById('crop-correct-answer') as HTMLSelectElement).value;
                 const notes = (document.getElementById('crop-notes') as HTMLTextAreaElement).value;
+                const sourceTypeRadio = document.querySelector('input[name="crop-source-type"]:checked') as HTMLInputElement | null;
+                const sourceType = (sourceTypeRadio?.value || 'kitap') as 'kitap' | 'bolum_denemesi' | 'cikmis_soru' | 'deneme_sinavi';
+                const examName = (document.getElementById('crop-exam-name') as HTMLInputElement)?.value?.trim() || '';
 
                 const newQuestion: SavedQuestion = {
                   id: uuidv4(),
@@ -6905,6 +6979,8 @@ export default function App() {
                   notes: notes || undefined,
                   pdfId: currentPdfId || undefined,
                   page: cropState?.page,
+                  sourceType,
+                  examName: examName || undefined,
                   rect: cropState ? {
                     x: Math.min(cropState.startX, cropState.currentX),
                     y: Math.min(cropState.startY, cropState.currentY),
@@ -8624,6 +8700,401 @@ export default function App() {
   // ═══════════════════════════════════════════════════════════════════════
   // ⏱ ÇALIŞMA SAYACI — Render
   // ═══════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════════
+  // 🎓 ÖĞRENME ATÖLYESİ — Bilimsel teknikler
+  // ═══════════════════════════════════════════════════════════════════════
+  const [atolyeTab, setAtolyeTab] = useState<'overview' | 'recall' | 'feynman' | 'spaced' | 'dual'>('overview');
+  const [feynmanTopic, setFeynmanTopic] = useState<string>('');
+  const [feynmanText, setFeynmanText] = useState<string>('');
+  const [feynmanGaps, setFeynmanGaps] = useState<string>('');
+  const [recallSubject, setRecallSubject] = useState<string>('');
+  const [recallQuestions, setRecallQuestions] = useState<string>('');
+  const [recallAnswered, setRecallAnswered] = useState<Record<number, string>>({});
+
+  const renderAtolye = () => {
+    return (
+      <div className="min-h-[100dvh] bg-gradient-to-br from-slate-950 via-purple-950/10 to-slate-950 flex flex-col animate-in fade-in duration-300">
+        {/* Header */}
+        <div className="sticky top-0 z-10 bg-slate-950/90 backdrop-blur-md border-b border-slate-800/50 px-3 py-2.5 flex items-center gap-3">
+          <button onClick={() => setMode('setup')} className="text-slate-400 hover:text-white p-1.5 rounded-lg bg-slate-800 border border-slate-700">
+            <Home size={16} />
+          </button>
+          <h1 className="text-base font-bold text-white flex items-center gap-1.5">🎓 Öğrenme Atölyesi</h1>
+        </div>
+
+        {/* Sekme bar */}
+        <div className="px-3 py-2 border-b border-slate-800/30 bg-slate-900/40 overflow-x-auto">
+          <div className="flex items-center gap-1.5 min-w-max">
+            {[
+              { id: 'overview', label: '📚 Genel Bakış', color: 'bg-purple-600' },
+              { id: 'recall', label: '🧠 Active Recall', color: 'bg-emerald-600' },
+              { id: 'feynman', label: '✏️ Feynman Tekniği', color: 'bg-blue-600' },
+              { id: 'spaced', label: '📅 Aralıklı Tekrar', color: 'bg-violet-600' },
+              { id: 'dual', label: '🎨 İkili Kodlama', color: 'bg-amber-600' },
+            ].map(t => (
+              <button
+                key={t.id}
+                onClick={() => setAtolyeTab(t.id as any)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all ${
+                  atolyeTab === t.id ? `${t.color} text-white shadow-md` : 'bg-slate-800/60 text-slate-400 hover:bg-slate-800'
+                }`}
+              >{t.label}</button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-3 max-w-3xl mx-auto w-full">
+          {/* GENEL BAKIŞ */}
+          {atolyeTab === 'overview' && (
+            <div className="space-y-3">
+              <div className="bg-gradient-to-br from-purple-950/40 to-slate-900/60 border border-purple-700/30 rounded-2xl p-4">
+                <h2 className="text-lg font-bold text-white mb-2">🧠 Bilimsel Öğrenme Teknikleri</h2>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Sadece okumak değil, doğru çalışmak. Bu sayfa, kanıtlanmış bilişsel bilim tekniklerini içerir.
+                  Her biri sınava hazırlık için %30-70 verim artışı sağlar (Dunlosky ve ark., 2013).
+                </p>
+              </div>
+
+              {[
+                { 
+                  id: 'recall', icon: '🧠', title: 'Active Recall', short: 'Aktif Hatırlama',
+                  effect: 'En etkili teknik (Roediger & Karpicke, 2006)',
+                  desc: 'Notlara bakmadan kendi kendine soru sor. Beyni bilgiyi yeniden inşa etmeye zorlar — pasif okumaya göre %50 daha kalıcı.',
+                  use: 'Tekrar etmek istediğin konuda kendine soru üret, cevapla, kontrol et.'
+                },
+                { 
+                  id: 'feynman', icon: '✏️', title: 'Feynman Tekniği', short: 'Anlatarak Öğrenme',
+                  effect: 'Nobel ödüllü Richard Feynman tekniği',
+                  desc: 'Bir konuyu 5 yaşındaki bir çocuğa anlatabilecek kadar basit ifadelerle yaz. Anlamadığın yerleri açığa çıkarır.',
+                  use: 'Konu adı yaz → kendi cümlelerinle anlat → boşlukları işaretle → o boşlukları doldur.'
+                },
+                { 
+                  id: 'spaced', icon: '📅', title: 'Aralıklı Tekrar', short: 'Spaced Repetition',
+                  effect: 'Ebbinghaus unutma eğrisi tabanlı (1885)',
+                  desc: 'Bilgi unutma eğrisinin dibine inmeden tekrar et. KPSS Ustası bu sistemi otomatik uyguluyor.',
+                  use: 'Yeni: 1 gün → 3 gün → 1 hafta → 2 hafta → 1 ay → 3 ay aralıklarla tekrar.'
+                },
+                { 
+                  id: 'dual', icon: '🎨', title: 'İkili Kodlama', short: 'Dual Coding',
+                  effect: 'Allan Paivio (1971) — beyin görsel + sözel ayrı işler',
+                  desc: 'Metin + resim/diyagram birlikte kullan. Bilgi iki yoldan kaydedilir, hatırlama 2 katına çıkar.',
+                  use: 'Konu özeti yazarken yanına basit çizim/şema ekle. Notlarına ikon ve renk koy.'
+                },
+                { 
+                  id: 'interleave', icon: '🔀', title: 'Karışık Çalışma',
+                  effect: 'Interleaving — Rohrer ve ark. (2015)',
+                  desc: 'Aynı konuyu uzun uzun değil, 3 farklı konuyu kısa kısa çalış. Beyni konular arası geçişe alıştırır.',
+                  use: 'Bugün tarih → matematik → türkçe (her biri 30dk). Yarın matematik → türkçe → tarih.'
+                },
+                { 
+                  id: 'elaborate', icon: '🔗', title: 'Detaylandırma',
+                  effect: 'Elaborative Interrogation — Pressley (1992)',
+                  desc: 'Her yeni bilgide "neden?" ve "nasıl?" sor. Bilgiyi mevcut bildiklerine bağla.',
+                  use: 'Cumhuriyet 1923\'te ilan edildi → Neden 1923? Hangi şartlar etkiledi? Sonuçları?'
+                },
+              ].map(t => (
+                <button
+                  key={t.id}
+                  onClick={() => t.id === 'recall' || t.id === 'feynman' || t.id === 'spaced' || t.id === 'dual' ? setAtolyeTab(t.id as any) : null}
+                  className="w-full text-left bg-slate-900/40 border border-slate-700/30 hover:border-slate-600/50 rounded-2xl p-4 transition-all"
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="text-3xl flex-shrink-0">{t.icon}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <h3 className="text-sm font-bold text-white">{t.title}</h3>
+                        <span className="text-[10px] text-purple-300 bg-purple-950/60 px-1.5 py-0.5 rounded">{t.effect}</span>
+                      </div>
+                      <p className="text-xs text-slate-300 leading-relaxed mb-2">{t.desc}</p>
+                      <div className="text-[10px] text-emerald-300 bg-emerald-950/30 rounded-md p-2 border border-emerald-900/40">
+                        <span className="font-bold">💡 Nasıl uygulanır: </span>{t.use}
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* ACTIVE RECALL */}
+          {atolyeTab === 'recall' && (
+            <div className="space-y-3">
+              <div className="bg-emerald-950/30 border border-emerald-700/30 rounded-2xl p-4">
+                <h2 className="text-base font-bold text-emerald-300 flex items-center gap-2 mb-2">🧠 Active Recall — Hatırlama Pratiği</h2>
+                <p className="text-xs text-slate-300 leading-relaxed mb-2">
+                  En etkili öğrenme tekniği. Kapalı kitap soru-cevap. Bilgi her hatırlandığında nöral bağ güçlenir.
+                </p>
+                <div className="text-[10px] text-emerald-200/70 bg-emerald-950/40 rounded-md p-2">
+                  📖 Roediger & Karpicke (2006): Test eden öğrenciler okuyanlardan %50 daha çok hatırladı (1 hafta sonra).
+                </div>
+              </div>
+
+              <div className="bg-slate-900/40 border border-slate-700/30 rounded-2xl p-4 space-y-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1">📚 Konu</label>
+                  <input
+                    value={recallSubject}
+                    onChange={e => setRecallSubject(e.target.value)}
+                    placeholder="örn: Atatürk İnkılapları"
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1">❓ Sorular (her satıra bir tane)</label>
+                  <textarea
+                    value={recallQuestions}
+                    onChange={e => setRecallQuestions(e.target.value)}
+                    placeholder={`Cumhuriyet hangi yıl ilan edildi?\nLatin alfabesi kabulü ne zaman?\nTBMM ne zaman açıldı?`}
+                    rows={6}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white resize-y font-mono"
+                  />
+                </div>
+                <div className="text-[10px] text-slate-500">
+                  💡 Önce kendi cevaplarını yazmadan SÖYLE. Sonra not defterine yaz. En son not'a bak ve doğrula.
+                </div>
+              </div>
+
+              {recallQuestions.trim() && (
+                <div className="bg-slate-900/60 border border-emerald-700/30 rounded-2xl p-4">
+                  <h3 className="text-sm font-bold text-emerald-300 mb-3">🎯 Pratik Modu</h3>
+                  <div className="space-y-3">
+                    {recallQuestions.split('\n').filter(q => q.trim()).map((q, i) => (
+                      <div key={i} className="bg-slate-800/40 rounded-xl p-3 border border-slate-700/40">
+                        <div className="flex items-start gap-2 mb-2">
+                          <span className="text-emerald-400 font-bold text-xs">{i+1}.</span>
+                          <span className="text-sm text-white flex-1">{q.trim()}</span>
+                        </div>
+                        <textarea
+                          value={recallAnswered[i] || ''}
+                          onChange={e => setRecallAnswered(prev => ({ ...prev, [i]: e.target.value }))}
+                          placeholder="Cevabını yaz (önce kafanda söyle, sonra yaz)..."
+                          rows={2}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-md px-2 py-1.5 text-xs text-slate-200 resize-none"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => {
+                      // Bu soruları ezber kartı olarak kaydet
+                      const qs = recallQuestions.split('\n').filter(q => q.trim());
+                      qs.forEach(async (qText, i) => {
+                        const ans = recallAnswered[i] || '';
+                        if (qText && ans) {
+                          await addMemorizeCard({
+                            id: uuidv4(),
+                            subject: recallSubject || 'Genel',
+                            topic: '', front: qText.trim(), back: ans.trim(),
+                            easiness: 2.5, interval: 0, repetitions: 0,
+                            nextReviewDate: new Date().toISOString().split('T')[0],
+                            createdAt: Date.now(), reviewHistory: [],
+                          } as any);
+                        }
+                      });
+                      alert(`${qs.length} soru ezber kartı olarak kaydedildi! KPSS Ustası'nda tekrar gelecekler.`);
+                      setRecallQuestions(''); setRecallAnswered({});
+                    }}
+                    className="w-full mt-3 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold py-2 rounded-lg"
+                  >💾 Ezber Kartı Olarak Kaydet</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* FEYNMAN */}
+          {atolyeTab === 'feynman' && (
+            <div className="space-y-3">
+              <div className="bg-blue-950/30 border border-blue-700/30 rounded-2xl p-4">
+                <h2 className="text-base font-bold text-blue-300 flex items-center gap-2 mb-2">✏️ Feynman Tekniği</h2>
+                <p className="text-xs text-slate-300 leading-relaxed mb-2">
+                  Bir konuyu 5 yaşındaki bir çocuğa anlatabilecek kadar basit ifadelerle yaz. 
+                  Karmaşık jargon kullanma. Anlamadığın yerleri sen de göreceksin.
+                </p>
+                <div className="text-[10px] text-blue-200/70 bg-blue-950/40 rounded-md p-2">
+                  📖 Richard Feynman (Nobel ödüllü fizikçi): "Eğer basit anlatamıyorsan, yeterince anlamamışsındır."
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                {/* 1. Adım */}
+                <div className="bg-slate-900/40 border border-slate-700/30 rounded-2xl p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="bg-blue-600 text-white w-7 h-7 rounded-full flex items-center justify-center font-bold text-sm">1</span>
+                    <h3 className="text-sm font-bold text-white">Konuyu Yaz</h3>
+                  </div>
+                  <input
+                    value={feynmanTopic}
+                    onChange={e => setFeynmanTopic(e.target.value)}
+                    placeholder="örn: Türkçe Edebiyatında Tanzimat Dönemi"
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                  />
+                </div>
+
+                {/* 2. Adım */}
+                <div className="bg-slate-900/40 border border-slate-700/30 rounded-2xl p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="bg-blue-600 text-white w-7 h-7 rounded-full flex items-center justify-center font-bold text-sm">2</span>
+                    <h3 className="text-sm font-bold text-white">Çocuğa Anlatır Gibi Yaz</h3>
+                  </div>
+                  <p className="text-[10px] text-slate-400 mb-2">
+                    Basit kelimeler kullan. Jargon yok. Sanki 5 yaşındaki birine anlatıyor gibi.
+                  </p>
+                  <textarea
+                    value={feynmanText}
+                    onChange={e => setFeynmanText(e.target.value)}
+                    placeholder="Tanzimat Dönemi 1839 yılında başladı. Osmanlı padişahı düşündü ki 'biz Avrupa'dan geriye düşüyoruz, yenilikleri alalım'. Bu yüzden bir ferman çıkardı..."
+                    rows={6}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white resize-y leading-relaxed"
+                  />
+                  <div className="text-[10px] text-slate-500 mt-1.5">{feynmanText.length} karakter • {feynmanText.split(/\s+/).filter(Boolean).length} kelime</div>
+                </div>
+
+                {/* 3. Adım */}
+                <div className="bg-slate-900/40 border border-slate-700/30 rounded-2xl p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="bg-amber-600 text-white w-7 h-7 rounded-full flex items-center justify-center font-bold text-sm">3</span>
+                    <h3 className="text-sm font-bold text-white">Boşlukları Tespit Et</h3>
+                  </div>
+                  <p className="text-[10px] text-slate-400 mb-2">
+                    2. adımda anlatamadığın, atladığın, "burada karışık" dediğin yerler. Onları bul, oraları okumak için kaynaklara dön.
+                  </p>
+                  <textarea
+                    value={feynmanGaps}
+                    onChange={e => setFeynmanGaps(e.target.value)}
+                    placeholder="• Hangi paşalar etkili oldu, isimleri karışık\n• Tanzimat ile Islahat farkı net değil\n• Sonuçlarını basit anlatamadım"
+                    rows={4}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white resize-y"
+                  />
+                </div>
+
+                {/* 4. Adım — kaydet */}
+                {feynmanTopic && feynmanText && (
+                  <button
+                    onClick={async () => {
+                      const noteText = `KONU: ${feynmanTopic}\n\nANLATIM:\n${feynmanText}\n\nBOŞLUKLAR:\n${feynmanGaps}`;
+                      await addMemorizeCard({
+                        id: uuidv4(),
+                        subject: 'Feynman Notları',
+                        topic: feynmanTopic,
+                        front: feynmanTopic,
+                        back: feynmanText,
+                        easiness: 2.5, interval: 0, repetitions: 0,
+                        nextReviewDate: new Date().toISOString().split('T')[0],
+                        createdAt: Date.now(), reviewHistory: [],
+                      } as any);
+                      alert('Feynman notu ezber kartı olarak kaydedildi!');
+                      setFeynmanTopic(''); setFeynmanText(''); setFeynmanGaps('');
+                    }}
+                    className="w-full bg-blue-600 hover:bg-blue-500 text-white text-sm font-bold py-3 rounded-xl"
+                  >💾 Ezber Kartı Olarak Kaydet ve Tekrara Al</button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* SPACED */}
+          {atolyeTab === 'spaced' && (
+            <div className="space-y-3">
+              <div className="bg-violet-950/30 border border-violet-700/30 rounded-2xl p-4">
+                <h2 className="text-base font-bold text-violet-300 flex items-center gap-2 mb-2">📅 Aralıklı Tekrar Sistemi</h2>
+                <p className="text-xs text-slate-300 leading-relaxed mb-2">
+                  Hermann Ebbinghaus 1885'te keşfetti: bilgi unutma eğrisinin dibine inmeden tekrar edersen kalıcı oluyor. 
+                  KPSS Ustası bu sistemi otomatik uygular.
+                </p>
+                <div className="text-[10px] text-violet-200/70 bg-violet-950/40 rounded-md p-2">
+                  📖 SuperMemo SM-2 algoritması (Wozniak, 1987) — Anki, Quizlet ve KPSS Ustası bunu kullanır.
+                </div>
+              </div>
+
+              <div className="bg-slate-900/40 border border-slate-700/30 rounded-2xl p-4">
+                <h3 className="text-sm font-bold text-white mb-3">🧬 Optimal Tekrar Aralıkları</h3>
+                <div className="space-y-2">
+                  {[
+                    { day: '1. tekrar', when: 'Öğrenmeden 1 gün sonra', reason: 'İlk gece uyku sırasında bilgi RAM\'den HDD\'ye geçer (hipokampus → korteks).', color: 'bg-emerald-600' },
+                    { day: '2. tekrar', when: '3 gün sonra', reason: 'Kısa süreli unutma eğrisinin %70 dibinde — geri çıkarmak güçlendirir.', color: 'bg-blue-600' },
+                    { day: '3. tekrar', when: '1 hafta sonra', reason: 'Beyin "bu önemliymiş" der, uzun süreli belleğe alır.', color: 'bg-violet-600' },
+                    { day: '4. tekrar', when: '2 hafta sonra', reason: 'Mature aşaması — neredeyse otomatik hatırlama.', color: 'bg-purple-600' },
+                    { day: '5. tekrar', when: '1 ay sonra', reason: 'Yarı kalıcı bellek — sınava hazır seviye.', color: 'bg-pink-600' },
+                    { day: '6. tekrar', when: '3 ay sonra', reason: 'Kalıcı bellek — sınav günü erişilebilir.', color: 'bg-rose-600' },
+                  ].map((s, i) => (
+                    <div key={i} className="flex items-start gap-3 bg-slate-800/40 rounded-lg p-2.5">
+                      <div className={`${s.color} text-white w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs flex-shrink-0`}>
+                        {i+1}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2 mb-0.5">
+                          <span className="text-xs font-bold text-white">{s.day}</span>
+                          <span className="text-[10px] text-emerald-300 font-mono">{s.when}</span>
+                        </div>
+                        <p className="text-[10px] text-slate-300 leading-snug">{s.reason}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-emerald-950/30 border border-emerald-700/30 rounded-2xl p-4">
+                <h3 className="text-sm font-bold text-emerald-300 mb-2">⚡ KPSS Ustası ile Otomatik Tekrar</h3>
+                <p className="text-xs text-slate-300 leading-relaxed mb-3">
+                  Sayfa altındaki butonla KPSS Ustası'na gir. Sistem hangi soruyu ne zaman sorman gerektiğini hesaplar.
+                </p>
+                <button
+                  onClick={() => { setMode('ustasi'); startUstasi(); }}
+                  className="w-full bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 text-white text-sm font-bold py-3 rounded-xl shadow-lg shadow-violet-900/30"
+                >⚡ KPSS Ustası'nı Başlat</button>
+              </div>
+            </div>
+          )}
+
+          {/* DUAL CODING */}
+          {atolyeTab === 'dual' && (
+            <div className="space-y-3">
+              <div className="bg-amber-950/30 border border-amber-700/30 rounded-2xl p-4">
+                <h2 className="text-base font-bold text-amber-300 flex items-center gap-2 mb-2">🎨 İkili Kodlama (Dual Coding)</h2>
+                <p className="text-xs text-slate-300 leading-relaxed mb-2">
+                  Beyin sözel ve görsel bilgiyi ayrı kanallarda işler. İkisini birlikte kullanırsan bilgi 2 kat kalıcı olur.
+                </p>
+                <div className="text-[10px] text-amber-200/70 bg-amber-950/40 rounded-md p-2">
+                  📖 Allan Paivio (1971) — Dual Coding Theory. İkili kodlama hatırlamayı %150 artırır.
+                </div>
+              </div>
+
+              <div className="bg-slate-900/40 border border-slate-700/30 rounded-2xl p-4 space-y-3">
+                <h3 className="text-sm font-bold text-white">💡 Pratik Uygulamalar</h3>
+                
+                {[
+                  { icon: '🗺️', title: 'Zihin Haritası', text: 'Konunun merkezine ana fikri yaz, çevresine alt başlıkları çiz, oklarla bağla. Kâğıt + kalem yeterli.' },
+                  { icon: '📊', title: 'Diyagram', text: 'Süreç anlatan konularda akış şeması (Tanzimat → Islahat → Meşrutiyet). Tarihsel ilişkilerde zaman çizgisi.' },
+                  { icon: '🎨', title: 'Renkli Notlar', text: 'Aynı renkle ilişkili kavramları işaretle (sebep=kırmızı, sonuç=yeşil, tarih=mavi).' },
+                  { icon: '🖼️', title: 'Mental İmgeler', text: 'Soyut kavramları somut nesnelerle hayal et (örn: "Tanzimat" deyince Avrupa elçisinin sarayda gezindiği bir tablo).' },
+                  { icon: '📸', title: 'PDF Üzerine Kes', text: 'Bu uygulamada Not Kes özelliğini kullan. Görsel bağlamla beraber kaydedilir.', action: () => setMode('saved_notes') },
+                  { icon: '🔗', title: 'Eşleştirme', text: 'Kavram + ikon (Madde işaretleri yerine emoji): 1923 → 🎉 (cumhuriyet bayramı), Latin alfabesi → 🔤' },
+                ].map((d, i) => (
+                  <button
+                    key={i}
+                    onClick={d.action}
+                    disabled={!d.action}
+                    className={`w-full text-left bg-slate-800/40 hover:bg-slate-800 border border-slate-700/30 rounded-xl p-3 transition-all ${d.action ? 'cursor-pointer' : 'cursor-default'}`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <span className="text-2xl flex-shrink-0">{d.icon}</span>
+                      <div className="flex-1">
+                        <h4 className="text-xs font-bold text-white mb-0.5">{d.title}</h4>
+                        <p className="text-[11px] text-slate-300 leading-relaxed">{d.text}</p>
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="h-8" />
+        </div>
+      </div>
+    );
+  };
+
   const renderCalisma = () => {
     const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
     const now = Date.now();
@@ -9808,9 +10279,24 @@ export default function App() {
               </span>
               <span className="text-slate-600">•</span>
               <span className="text-slate-500">{q.subject}{q.topic ? ` / ${q.topic}` : ''}</span>
+              {q.sourceType && q.sourceType !== 'kitap' && (
+                <>
+                  <span className="text-slate-600">•</span>
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded animate-pulse ${
+                    q.sourceType === 'cikmis_soru' ? 'bg-amber-500/20 text-amber-300' :
+                    q.sourceType === 'deneme_sinavi' ? 'bg-rose-500/20 text-rose-300' :
+                    'bg-violet-500/20 text-violet-300'
+                  }`}>
+                    {q.sourceType === 'cikmis_soru' ? '⭐ ÇIKMIŞ SORU' :
+                     q.sourceType === 'deneme_sinavi' ? '🎯 DENEME' :
+                     '📝 BÖLÜM'}
+                  </span>
+                </>
+              )}
             </div>
             <div className="text-[10px] text-slate-500">
               {q.srsReviewCount ? `${q.srsReviewCount}. tekrar` : 'Yeni soru'}
+              {q.examName && ` • ${q.examName}`}
             </div>
           </div>
         </div>
@@ -10663,11 +11149,33 @@ export default function App() {
   };
 
   const renderSavedQuestions = () => {
-    const grouped = savedQuestions.reduce((acc, sq) => {
+    // Filtre uygula
+    const filteredQuestions = savedQuestions.filter(q => {
+      if (qSourceFilter === 'all') return true;
+      if (qSourceFilter === 'special') {
+        return q.sourceType && q.sourceType !== 'kitap';
+      }
+      if (qSourceFilter === 'kitap') {
+        return !q.sourceType || q.sourceType === 'kitap';
+      }
+      return q.sourceType === qSourceFilter;
+    });
+    
+    const grouped = filteredQuestions.reduce((acc, sq) => {
       if (!acc[sq.subject]) acc[sq.subject] = [];
       acc[sq.subject].push(sq);
       return acc;
     }, {} as Record<string, SavedQuestion[]>);
+
+    // Sayım her kategori için
+    const counts = {
+      all: savedQuestions.length,
+      special: savedQuestions.filter(q => q.sourceType && q.sourceType !== 'kitap').length,
+      kitap: savedQuestions.filter(q => !q.sourceType || q.sourceType === 'kitap').length,
+      bolum_denemesi: savedQuestions.filter(q => q.sourceType === 'bolum_denemesi').length,
+      cikmis_soru: savedQuestions.filter(q => q.sourceType === 'cikmis_soru').length,
+      deneme_sinavi: savedQuestions.filter(q => q.sourceType === 'deneme_sinavi').length,
+    };
 
     return (
       <div className="min-h-[100dvh] bg-slate-950 flex flex-col animate-in fade-in duration-300 overflow-x-hidden">
@@ -10781,9 +11289,48 @@ export default function App() {
               </button>
             </div>
           ) : (
-            <div className="space-y-8">
-              {Object.entries(grouped).map(([subject, questions]) => (
-                <div key={subject}>
+            <div className="space-y-4">
+              {/* Kaynak Filtre Sekmeleri */}
+              <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-2 overflow-x-auto">
+                <div className="flex items-center gap-1.5 min-w-max">
+                  {[
+                    { id: 'all', label: '📂 Tümü', color: 'bg-slate-700', count: counts.all },
+                    { id: 'special', label: '⭐ Önemli', color: 'bg-amber-700', count: counts.special, hint: 'Bölüm + Çıkmış + Deneme' },
+                    { id: 'cikmis_soru', label: '⭐ Çıkmış Soru', color: 'bg-amber-600', count: counts.cikmis_soru },
+                    { id: 'deneme_sinavi', label: '🎯 Deneme Sınavı', color: 'bg-rose-600', count: counts.deneme_sinavi },
+                    { id: 'bolum_denemesi', label: '📝 Bölüm Denemesi', color: 'bg-violet-600', count: counts.bolum_denemesi },
+                    { id: 'kitap', label: '📚 Kitap', color: 'bg-blue-600', count: counts.kitap },
+                  ].map(f => (
+                    <button
+                      key={f.id}
+                      onClick={() => setQSourceFilter(f.id as any)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap ${
+                        qSourceFilter === f.id
+                          ? `${f.color} text-white shadow-md`
+                          : 'bg-slate-800/60 text-slate-400 hover:bg-slate-800'
+                      }`}
+                      title={(f as any).hint || ''}
+                    >
+                      <span>{f.label}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${qSourceFilter === f.id ? 'bg-white/20' : 'bg-slate-900/60'}`}>{f.count}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {filteredQuestions.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-[40vh] text-slate-500">
+                  <div className="text-4xl mb-3">🔍</div>
+                  <p className="text-slate-400 text-sm">Bu filtrede soru yok</p>
+                  <button
+                    onClick={() => setQSourceFilter('all')}
+                    className="mt-3 text-xs text-blue-400 hover:text-blue-300"
+                  >Tümünü göster</button>
+                </div>
+              ) : (
+                <div className="space-y-8">
+                  {Object.entries(grouped).map(([subject, questions]) => (
+                    <div key={subject}>
                   <div className="flex items-center justify-between mb-4 border-b border-slate-800 pb-2">
                     <h2 className="text-xl font-bold text-white flex items-center gap-2">
                       <div className="w-3 h-3 rounded-full bg-blue-500"></div>
@@ -10815,7 +11362,7 @@ export default function App() {
                     {(questions as SavedQuestion[]).map(q => (
                       <div key={q.id} className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-lg group hover:border-slate-700 hover:shadow-xl hover:shadow-blue-900/10 transition-all duration-300 flex flex-col">
                         <div className="px-2.5 py-1.5 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             {q.questionNumber > 0 && (
                               <span className="text-[10px] font-medium text-slate-500 bg-slate-800/60 px-1.5 py-0.5 rounded">#{q.questionNumber}</span>
                             )}
@@ -10826,6 +11373,19 @@ export default function App() {
                             }`}>
                               {q.difficulty}
                             </span>
+                            {q.sourceType && q.sourceType !== 'kitap' && (
+                              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                q.sourceType === 'cikmis_soru' ? 'bg-amber-500/20 text-amber-300' :
+                                q.sourceType === 'deneme_sinavi' ? 'bg-rose-500/20 text-rose-300' :
+                                'bg-violet-500/20 text-violet-300'
+                              }`}
+                              title={q.examName || ''}
+                              >
+                                {q.sourceType === 'cikmis_soru' ? '⭐ ÇIKMIŞ' :
+                                 q.sourceType === 'deneme_sinavi' ? '🎯 DENEME' :
+                                 '📝 BÖLÜM'}
+                              </span>
+                            )}
                           </div>
                           <button 
                             onClick={(e) => {
@@ -10881,6 +11441,8 @@ export default function App() {
                   </div>
                 </div>
               ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -11220,6 +11782,7 @@ export default function App() {
       {mode === 'ustasi' && renderUstasi()}
       {mode === 'analiz' && renderAnaliz()}
       {mode === 'calisma' && renderCalisma()}
+      {mode === 'atolye' && renderAtolye()}
       {gameModeQuestions && renderGameMode()}
       {renderNoteModal()}
       {renderQuestionCropModal()}

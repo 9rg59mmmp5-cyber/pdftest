@@ -30,7 +30,37 @@ const OPTIMAL_DPR = (() => {
   return Math.min(2, Math.max(1.5, dpr));
 })();
 
-type Mode = 'setup' | 'taking' | 'grading' | 'results' | 'saved_questions' | 'saved_notes' | 'memorize' | 'ustasi' | 'analiz' | 'calisma' | 'atolye';
+type Mode = 'setup' | 'taking' | 'grading' | 'results' | 'saved_questions' | 'saved_notes' | 'memorize' | 'ustasi' | 'analiz' | 'calisma' | 'atolye' | 'plan';
+
+// 📅 Günlük Plan görev tipleri
+type PlanTaskType = 'study' | 'video' | 'questions' | 'review' | 'flashcards' | 'note';
+
+interface PlanTask {
+  id: string;
+  date: string;              // YYYY-MM-DD
+  type: PlanTaskType;        // 📖 study, 📺 video, ❓ questions, 📝 review, 🃏 flashcards, ✍️ note
+  title: string;             // "Tarih - Atatürk İnkılapları"
+  startTime?: string;        // "09:00" — opsiyonel, yoksa sadece sıra
+  durationMin: number;       // 60 dk
+  subject?: string;          // "Tarih"
+  // Tipe göre alanlar:
+  videoUrl?: string;         // YouTube link
+  videoTitle?: string;       // Video başlığı
+  questionCount?: number;    // Soru sayısı
+  questionSource?: 'kitap' | 'bolum_denemesi' | 'cikmis_soru' | 'deneme_sinavi';
+  examName?: string;
+  bookName?: string;         // Kitap adı
+  pageRange?: string;        // "120-145"
+  pdfId?: string;            // pdftest içinden seçilen PDF
+  notes?: string;
+  // Durum:
+  completed: boolean;
+  completedAt?: number;
+  actualDurationSec?: number; // Gerçekten ne kadar çalıştı (sayaçtan)
+  correctCount?: number;     // Soru tipinde — kaç doğru
+  order: number;             // Gün içinde sıra
+  createdAt: number;
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // ⏱ ÇALIŞMA SAYACI — Types
@@ -748,6 +778,13 @@ export default function App() {
   const [cropSubject, setCropSubject] = useState<string>(SUBJECTS[0]);
   const [cropTopic, setCropTopic] = useState<string>('');
   const [lastTopicBySubject, setLastTopicBySubject] = useState<Record<string, string>>({});
+  // 📅 Plan state
+  const [planTasks, setPlanTasks] = useState<PlanTask[]>([]);
+  const [planTab, setPlanTab] = useState<'today' | 'week' | 'archive'>('today');
+  const [planSelectedDate, setPlanSelectedDate] = useState<string>('');
+  const [planEditingTask, setPlanEditingTask] = useState<PlanTask | null>(null);
+  const [showPlanTaskModal, setShowPlanTaskModal] = useState(false);
+  const [activePlanTaskId, setActivePlanTaskId] = useState<string | null>(null); // Şu an çalışılan görev
   // Sorular sayfası kaynak filtresi
   const [qSourceFilter, setQSourceFilter] = useState<'all' | 'kitap' | 'bolum_denemesi' | 'cikmis_soru' | 'deneme_sinavi' | 'special'>('all');
   const [showTestBuilderModal, setShowTestBuilderModal] = useState<boolean>(false);
@@ -1301,6 +1338,32 @@ export default function App() {
           if (typeof settings.browserNotifOn === 'boolean') setStudyBrowserNotifOn(settings.browserNotifOn);
         }
       }
+      
+      // 📅 Plan görevlerini yükle (son 30 gün)
+      try {
+        const pr = await fetch(`${BASE}/plan/tasks`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (pr.ok) {
+          const { tasks } = await pr.json();
+          if (Array.isArray(tasks)) {
+            setPlanTasks(tasks.map((t: any) => ({
+              id: t.id, date: t.date, type: t.type, title: t.title,
+              startTime: t.start_time || undefined,
+              durationMin: t.duration_min, subject: t.subject || undefined,
+              videoUrl: t.video_url || undefined, videoTitle: t.video_title || undefined,
+              questionCount: t.question_count || undefined, questionSource: t.question_source || undefined,
+              examName: t.exam_name || undefined, bookName: t.book_name || undefined,
+              pageRange: t.page_range || undefined, pdfId: t.pdf_id || undefined,
+              notes: t.notes || undefined,
+              completed: !!t.completed, completedAt: t.completed_at || undefined,
+              actualDurationSec: t.actual_duration_sec || undefined,
+              correctCount: t.correct_count || undefined,
+              order: t.order_idx || 0, createdAt: t.created_at,
+            })));
+          }
+        }
+      } catch {}
     } catch {}
   };
 
@@ -1584,7 +1647,137 @@ export default function App() {
   };
 
   // Çalışma başlat
-  const startStudyWork = () => {
+  // ═══════════════════════════════════════════════════════════════════════
+  // 📅 PLAN HELPERS
+  // ═══════════════════════════════════════════════════════════════════════
+  
+  // Görevi sunucuya kaydet (upsert)
+  const savePlanTask = async (task: PlanTask) => {
+    if (!user) return;
+    try {
+      const token = await user.getIdToken();
+      const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+      await fetch(`${BASE}/plan/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          id: task.id, date: task.date, type: task.type, title: task.title,
+          start_time: task.startTime || null, duration_min: task.durationMin,
+          subject: task.subject || null,
+          video_url: task.videoUrl || null, video_title: task.videoTitle || null,
+          question_count: task.questionCount || null, question_source: task.questionSource || null,
+          exam_name: task.examName || null,
+          book_name: task.bookName || null, page_range: task.pageRange || null,
+          pdf_id: task.pdfId || null, notes: task.notes || null,
+          completed: task.completed, completed_at: task.completedAt || null,
+          actual_duration_sec: task.actualDurationSec || null,
+          correct_count: task.correctCount || null,
+          order_idx: task.order, created_at: task.createdAt,
+        }),
+      });
+      // Local state'i de güncelle
+      setPlanTasks(prev => {
+        const i = prev.findIndex(p => p.id === task.id);
+        if (i >= 0) {
+          const next = [...prev]; next[i] = task; return next;
+        }
+        return [...prev, task];
+      });
+    } catch (e) { console.error('Plan task kaydedilemedi:', e); }
+  };
+  
+  // Görevi sil
+  const deletePlanTask = async (id: string) => {
+    if (!user) return;
+    try {
+      const token = await user.getIdToken();
+      const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+      await fetch(`${BASE}/plan/tasks/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setPlanTasks(prev => prev.filter(p => p.id !== id));
+    } catch {}
+  };
+  
+  // Bir günü başka güne kopyala
+  const copyPlanDay = async (fromDate: string, toDate: string) => {
+    if (!user) return;
+    try {
+      const token = await user.getIdToken();
+      const BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/pdftest/api';
+      const r = await fetch(`${BASE}/plan/copy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ from_date: fromDate, to_date: toDate }),
+      });
+      if (r.ok) {
+        // Yeni görevleri çek
+        const pr = await fetch(`${BASE}/plan/tasks?date=${toDate}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (pr.ok) {
+          const { tasks } = await pr.json();
+          // Var olanları çıkar, yenileri ekle
+          setPlanTasks(prev => [
+            ...prev.filter(p => p.date !== toDate),
+            ...tasks.map((t: any) => ({
+              id: t.id, date: t.date, type: t.type, title: t.title,
+              startTime: t.start_time || undefined,
+              durationMin: t.duration_min, subject: t.subject || undefined,
+              videoUrl: t.video_url || undefined, videoTitle: t.video_title || undefined,
+              questionCount: t.question_count || undefined, questionSource: t.question_source || undefined,
+              examName: t.exam_name || undefined, bookName: t.book_name || undefined,
+              pageRange: t.page_range || undefined, pdfId: t.pdf_id || undefined,
+              notes: t.notes || undefined,
+              completed: !!t.completed, completedAt: t.completed_at || undefined,
+              actualDurationSec: t.actual_duration_sec || undefined,
+              correctCount: t.correct_count || undefined,
+              order: t.order_idx || 0, createdAt: t.created_at,
+            })),
+          ]);
+        }
+      }
+    } catch {}
+  };
+  
+  // Görev süresine göre akıllı sayaç modu seç
+  const pickStudyModeForTask = (durationMin: number): StudyMode => {
+    if (durationMin <= 25) return 'pomodoro';
+    if (durationMin <= 50) return 'pomodoro_long';
+    if (durationMin <= 70) return 'desktime';
+    if (durationMin <= 100) return 'deepwork';
+    return 'flexible';
+  };
+  
+  // Bir göreve başla — mod seç, sayaç başlat, aktif görev olarak işaretle
+  const startPlanTask = (task: PlanTask) => {
+    const mode = pickStudyModeForTask(task.durationMin);
+    setStudyState(s => ({ ...s, mode }));
+    setActivePlanTaskId(task.id);
+    // Çalışma sayfasına git
+    setMode('calisma');
+    // Mode set'e zaman ver, sonra başlat
+    setTimeout(() => {
+      startStudyWork();
+    }, 100);
+  };
+  
+  // Görevi tamamla
+  const completePlanTask = async (task: PlanTask, correctCount?: number) => {
+    const updated: PlanTask = {
+      ...task,
+      completed: true,
+      completedAt: Date.now(),
+      correctCount: correctCount !== undefined ? correctCount : task.correctCount,
+    };
+    await savePlanTask(updated);
+    if (activePlanTaskId === task.id) {
+      setActivePlanTaskId(null);
+    }
+  };
+
+
     studyLastLocalActionRef.current = Date.now();
     const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
     setStudyState(s => ({
@@ -4198,6 +4391,22 @@ export default function App() {
               <span className="text-base leading-none">⏱</span>
               <span className="text-xs font-medium tracking-wide">Çalışma</span>
               {studyState.phase === 'working' && <span className="text-[9px] bg-emerald-600 text-white px-1.5 py-0.5 rounded-full font-bold">ON</span>}
+            </button>
+            <button
+              onClick={() => setMode('plan')}
+              className="px-2.5 py-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 rounded-lg transition-all flex items-center gap-1.5 border border-transparent hover:border-blue-700/50 relative"
+              title="Günlük plan, takvim, görevler"
+            >
+              <span className="text-base leading-none">📅</span>
+              <span className="text-xs font-medium tracking-wide">Plan</span>
+              {(() => {
+                const today = todayStr();
+                const todayIncomplete = planTasks.filter(t => t.date === today && !t.completed).length;
+                if (todayIncomplete > 0) {
+                  return <span className="text-[9px] bg-blue-600 text-white px-1.5 py-0.5 rounded-full font-bold">{todayIncomplete}</span>;
+                }
+                return null;
+              })()}
             </button>
             <button
               onClick={() => setMode('atolye')}
@@ -8801,6 +9010,739 @@ export default function App() {
   const [recallQuestions, setRecallQuestions] = useState<string>('');
   const [recallAnswered, setRecallAnswered] = useState<Record<number, string>>({});
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // 📅 GÜNLÜK PLAN sayfası
+  // ═══════════════════════════════════════════════════════════════════════
+  
+  const PLAN_TASK_TYPES: Array<{ id: PlanTaskType; icon: string; label: string; color: string }> = [
+    { id: 'study',      icon: '📖', label: 'Konu Çalışma', color: 'bg-blue-600' },
+    { id: 'video',      icon: '📺', label: 'Video İzleme', color: 'bg-rose-600' },
+    { id: 'questions',  icon: '❓', label: 'Soru Çözme',   color: 'bg-amber-600' },
+    { id: 'review',     icon: '📝', label: 'Tekrar',        color: 'bg-emerald-600' },
+    { id: 'flashcards', icon: '🃏', label: 'Ezber Tekrar',  color: 'bg-violet-600' },
+    { id: 'note',       icon: '✍️', label: 'Not Alma',      color: 'bg-cyan-600' },
+  ];
+  
+  const planTaskTypeMeta = (t: PlanTaskType) => PLAN_TASK_TYPES.find(p => p.id === t) || PLAN_TASK_TYPES[0];
+  
+  // Format saat: "09:00" + opsiyonel sıra "1. görev"
+  const formatTaskHeader = (task: PlanTask, idx: number): string => {
+    if (task.startTime) return task.startTime;
+    return `${idx + 1}.`;
+  };
+  
+  const renderPlan = () => {
+    const todayKey = todayStr();
+    const tasksOfDate = (date: string) => 
+      planTasks.filter(t => t.date === date).sort((a, b) => {
+        // Saat varsa saate göre, yoksa order'a göre
+        if (a.startTime && b.startTime) return a.startTime.localeCompare(b.startTime);
+        if (a.startTime && !b.startTime) return -1;
+        if (!a.startTime && b.startTime) return 1;
+        return a.order - b.order;
+      });
+    
+    const todayTasks = tasksOfDate(todayKey);
+    const todayCompleted = todayTasks.filter(t => t.completed).length;
+    const todayTotalMin = todayTasks.reduce((s, t) => s + t.durationMin, 0);
+    const todayDoneMin = todayTasks.filter(t => t.completed).reduce((s, t) => s + t.durationMin, 0);
+    
+    // Hafta görünümü için 7 günü hazırla (Pazartesi-Pazar)
+    const today = new Date();
+    const weekStart = new Date(today);
+    const dow = (today.getDay() + 6) % 7; // Pzt=0
+    weekStart.setDate(today.getDate() - dow);
+    const weekDays = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(weekStart);
+      d.setDate(weekStart.getDate() + i);
+      const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      const dt = tasksOfDate(key);
+      return {
+        date: key,
+        dayLabel: ['Pzt','Sal','Çar','Per','Cum','Cmt','Paz'][i],
+        dayNumber: d.getDate(),
+        tasks: dt,
+        completedCount: dt.filter(t => t.completed).length,
+        totalCount: dt.length,
+        isToday: key === todayKey,
+        isPast: key < todayKey,
+      };
+    });
+    
+    // Arşiv için tüm farklı tarihleri çıkar
+    const archiveDates = Array.from(new Set(planTasks.map(t => t.date)))
+      .filter(d => d !== todayKey)
+      .sort((a, b) => b.localeCompare(a));
+    
+    return (
+      <div className="min-h-[100dvh] bg-gradient-to-br from-slate-950 via-blue-950/10 to-slate-950 flex flex-col animate-in fade-in duration-300">
+        {/* Header */}
+        <div className="sticky top-0 z-20 bg-slate-950/90 backdrop-blur-md border-b border-slate-800/50 px-3 py-2.5 flex items-center gap-3">
+          <button onClick={() => setMode('setup')} className="text-slate-400 hover:text-white p-1.5 rounded-lg bg-slate-800 border border-slate-700">
+            <Home size={16} />
+          </button>
+          <h1 className="text-base font-bold text-white flex items-center gap-1.5">📅 Günlük Plan</h1>
+          <div className="ml-auto">
+            <button
+              onClick={() => {
+                const newTask: PlanTask = {
+                  id: uuidv4(),
+                  date: planTab === 'archive' && planSelectedDate ? planSelectedDate : todayKey,
+                  type: 'study',
+                  title: '',
+                  durationMin: 30,
+                  completed: false,
+                  order: 0,
+                  createdAt: Date.now(),
+                };
+                setPlanEditingTask(newTask);
+                setShowPlanTaskModal(true);
+              }}
+              className="bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow-md flex items-center gap-1"
+            >
+              <Plus size={14} /> Görev Ekle
+            </button>
+          </div>
+        </div>
+        
+        {/* Sekmeler */}
+        <div className="px-3 py-2 border-b border-slate-800/30 bg-slate-900/40 flex items-center gap-1.5">
+          {[
+            { id: 'today', label: '📌 Bugün', count: todayTasks.length },
+            { id: 'week', label: '📊 Hafta' },
+            { id: 'archive', label: '🗂 Arşiv', count: archiveDates.length },
+          ].map((t: any) => (
+            <button
+              key={t.id}
+              onClick={() => setPlanTab(t.id)}
+              className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+                planTab === t.id ? 'bg-blue-600 text-white shadow-md' : 'bg-slate-800/60 text-slate-400 hover:bg-slate-800'
+              }`}
+            >
+              <span>{t.label}</span>
+              {typeof t.count === 'number' && t.count > 0 && (
+                <span className={`text-[10px] px-1.5 py-0.5 rounded ${planTab === t.id ? 'bg-white/20' : 'bg-slate-900/60'}`}>{t.count}</span>
+              )}
+            </button>
+          ))}
+        </div>
+        
+        <div className="flex-1 overflow-y-auto p-3 max-w-3xl mx-auto w-full">
+          {/* BUGÜN SEKMESİ */}
+          {planTab === 'today' && (
+            <div className="space-y-3">
+              {/* Üst özet kart */}
+              <div className="bg-gradient-to-br from-blue-950/40 to-slate-900/60 border border-blue-700/30 rounded-2xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div>
+                    <div className="text-xs text-slate-400">Bugün — {new Date().toLocaleDateString('tr-TR', { weekday: 'long', day: 'numeric', month: 'long' })}</div>
+                    <div className="text-lg font-bold text-white">
+                      {todayCompleted}/{todayTasks.length} görev tamamlandı
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-xs text-slate-400">Süre</div>
+                    <div className="text-base font-bold text-blue-300">{todayDoneMin}/{todayTotalMin} dk</div>
+                  </div>
+                </div>
+                {todayTasks.length > 0 && (
+                  <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-blue-500 to-emerald-500 transition-all"
+                      style={{ width: `${todayTasks.length > 0 ? (todayCompleted / todayTasks.length) * 100 : 0}%` }}
+                    />
+                  </div>
+                )}
+              </div>
+              
+              {/* Görev listesi */}
+              {todayTasks.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-slate-500">
+                  <div className="text-5xl mb-3">📋</div>
+                  <p className="text-slate-400 text-sm mb-2">Bugün için henüz görev yok</p>
+                  <p className="text-slate-500 text-xs mb-4">Üstteki "Görev Ekle" butonuna basarak başlayabilirsin</p>
+                  {archiveDates.length > 0 && (
+                    <button
+                      onClick={async () => {
+                        // En son planlı günü kopyala
+                        const lastDay = archiveDates[0];
+                        if (confirm(`${lastDay} tarihindeki planı bugüne kopyalansın mı?`)) {
+                          await copyPlanDay(lastDay, todayKey);
+                        }
+                      }}
+                      className="bg-violet-700 hover:bg-violet-600 text-white text-xs font-bold px-3 py-2 rounded-lg"
+                    >
+                      📋 Önceki günü kopyala
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {todayTasks.map((task, idx) => {
+                    const meta = planTaskTypeMeta(task.type);
+                    const isActive = activePlanTaskId === task.id;
+                    return (
+                      <div
+                        key={task.id}
+                        className={`rounded-2xl p-3 border transition-all ${
+                          task.completed
+                            ? 'bg-emerald-950/20 border-emerald-700/30 opacity-70'
+                            : isActive
+                              ? 'bg-blue-950/30 border-blue-500/60 shadow-lg shadow-blue-900/20 animate-pulse'
+                              : 'bg-slate-900/40 border-slate-700/30 hover:border-slate-600/50'
+                        }`}
+                      >
+                        <div className="flex items-start gap-3">
+                          {/* Checkbox */}
+                          <button
+                            onClick={async () => {
+                              if (task.completed) {
+                                await savePlanTask({ ...task, completed: false, completedAt: undefined });
+                              } else {
+                                if (task.type === 'questions' && task.questionCount) {
+                                  const ans = window.prompt(`Kaç tane doğru bildin? (${task.questionCount} sorudan)`, '');
+                                  const correct = ans ? parseInt(ans) : 0;
+                                  await completePlanTask(task, isNaN(correct) ? 0 : correct);
+                                } else {
+                                  await completePlanTask(task);
+                                }
+                              }
+                            }}
+                            className={`mt-0.5 w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0 transition-all ${
+                              task.completed
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-slate-800 border border-slate-600 hover:border-emerald-500'
+                            }`}
+                          >
+                            {task.completed && <span className="text-sm font-bold">✓</span>}
+                          </button>
+                          
+                          {/* İçerik */}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${meta.color} text-white`}>
+                                {meta.icon} {formatTaskHeader(task, idx)}
+                              </span>
+                              <span className="text-[10px] text-slate-400">⏱ {task.durationMin}dk</span>
+                              {task.subject && (
+                                <span className="text-[10px] text-blue-300 bg-blue-950/40 px-1.5 py-0.5 rounded">{task.subject}</span>
+                              )}
+                              {isActive && (
+                                <span className="text-[9px] bg-blue-600 text-white px-1.5 py-0.5 rounded-full font-bold animate-pulse">▶ AKTİF</span>
+                              )}
+                            </div>
+                            <h3 className={`text-sm font-bold mb-1 ${task.completed ? 'text-slate-400 line-through' : 'text-white'}`}>
+                              {task.title || '(Başlıksız)'}
+                            </h3>
+                            
+                            {/* Tipe göre detay */}
+                            <div className="text-[11px] text-slate-300 space-y-0.5">
+                              {task.type === 'video' && (
+                                <>
+                                  {task.videoTitle && <div>📺 {task.videoTitle}</div>}
+                                  {task.videoUrl && (
+                                    <a href={task.videoUrl} target="_blank" rel="noreferrer" className="text-rose-300 hover:underline flex items-center gap-1 break-all">
+                                      🔗 {task.videoUrl.length > 50 ? task.videoUrl.slice(0, 50) + '...' : task.videoUrl}
+                                    </a>
+                                  )}
+                                </>
+                              )}
+                              {task.type === 'questions' && (
+                                <div className="flex items-center gap-2">
+                                  <span>❓ {task.questionCount} soru</span>
+                                  {task.questionSource && <span className="text-amber-300">📖 {
+                                    task.questionSource === 'cikmis_soru' ? 'Çıkmış' :
+                                    task.questionSource === 'deneme_sinavi' ? 'Deneme' :
+                                    task.questionSource === 'bolum_denemesi' ? 'Bölüm Deneme' : 'Kitap'
+                                  }</span>}
+                                  {task.examName && <span className="text-slate-400">— {task.examName}</span>}
+                                  {task.completed && task.correctCount !== undefined && (
+                                    <span className="text-emerald-300 font-bold">✓ {task.correctCount}/{task.questionCount}</span>
+                                  )}
+                                </div>
+                              )}
+                              {task.type === 'study' && (
+                                <>
+                                  {task.bookName && <div>📚 {task.bookName}</div>}
+                                  {task.pageRange && <div>📄 Sayfa: {task.pageRange}</div>}
+                                </>
+                              )}
+                              {task.notes && (
+                                <div className="italic text-slate-400 mt-1">💬 {task.notes}</div>
+                              )}
+                            </div>
+                            
+                            {/* Aksiyon butonları */}
+                            {!task.completed && (
+                              <div className="flex items-center gap-1.5 mt-2.5">
+                                {!isActive && (
+                                  <button
+                                    onClick={() => startPlanTask(task)}
+                                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold px-3 py-1.5 rounded-lg flex items-center gap-1"
+                                  >
+                                    ▶ Başlat
+                                  </button>
+                                )}
+                                {isActive && (
+                                  <button
+                                    onClick={() => setMode('calisma')}
+                                    className="bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold px-3 py-1.5 rounded-lg"
+                                  >
+                                    ⏱ Sayaç
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => {
+                                    setPlanEditingTask({ ...task });
+                                    setShowPlanTaskModal(true);
+                                  }}
+                                  className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] px-3 py-1.5 rounded-lg flex items-center gap-1"
+                                >
+                                  ✏️ Düzenle
+                                </button>
+                                <button
+                                  onClick={async () => {
+                                    if (confirm('Bu görev silinsin mi?')) {
+                                      await deletePlanTask(task.id);
+                                    }
+                                  }}
+                                  className="bg-rose-900/40 hover:bg-rose-800/60 text-rose-300 text-[11px] px-2 py-1.5 rounded-lg"
+                                >
+                                  🗑
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* HAFTA SEKMESİ */}
+          {planTab === 'week' && (
+            <div className="space-y-3">
+              <div className="bg-blue-950/30 border border-blue-700/30 rounded-2xl p-3">
+                <h3 className="text-sm font-bold text-blue-300 mb-1">📊 Bu Hafta</h3>
+                <p className="text-[11px] text-slate-400">Pazartesi-Pazar görev planın</p>
+              </div>
+              <div className="grid grid-cols-1 gap-2">
+                {weekDays.map(d => {
+                  const completion = d.totalCount > 0 ? (d.completedCount / d.totalCount) * 100 : 0;
+                  return (
+                    <button
+                      key={d.date}
+                      onClick={() => {
+                        setPlanSelectedDate(d.date);
+                        setPlanTab('archive');
+                      }}
+                      className={`text-left rounded-xl p-3 border transition-all ${
+                        d.isToday
+                          ? 'bg-blue-950/40 border-blue-500/60 ring-1 ring-blue-500/30'
+                          : d.totalCount === 0
+                            ? 'bg-slate-900/30 border-slate-800/40'
+                            : 'bg-slate-900/40 border-slate-700/30 hover:border-slate-600/50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-12 h-12 rounded-xl flex flex-col items-center justify-center font-bold ${
+                            d.isToday ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300'
+                          }`}>
+                            <div className="text-[9px]">{d.dayLabel}</div>
+                            <div className="text-base leading-none">{d.dayNumber}</div>
+                          </div>
+                          <div>
+                            <div className="text-xs font-bold text-white">
+                              {d.totalCount === 0 ? 'Plan yok' : `${d.completedCount}/${d.totalCount} görev`}
+                            </div>
+                            <div className="text-[10px] text-slate-400">
+                              {d.tasks.reduce((s, t) => s + t.durationMin, 0)} dk planlandı
+                            </div>
+                          </div>
+                        </div>
+                        {d.totalCount > 0 && (
+                          <div className={`text-sm font-bold ${
+                            completion >= 100 ? 'text-emerald-300' :
+                            completion >= 50 ? 'text-blue-300' :
+                            completion > 0 ? 'text-amber-300' : 'text-slate-500'
+                          }`}>
+                            %{Math.round(completion)}
+                          </div>
+                        )}
+                      </div>
+                      {d.totalCount > 0 && (
+                        <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full transition-all ${
+                              completion >= 100 ? 'bg-emerald-500' :
+                              completion >= 50 ? 'bg-blue-500' : 'bg-amber-500'
+                            }`}
+                            style={{ width: `${completion}%` }}
+                          />
+                        </div>
+                      )}
+                      {d.tasks.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {d.tasks.slice(0, 5).map(t => {
+                            const m = planTaskTypeMeta(t.type);
+                            return (
+                              <span
+                                key={t.id}
+                                className={`text-[9px] px-1.5 py-0.5 rounded ${
+                                  t.completed ? 'bg-emerald-900/40 text-emerald-300' : `${m.color} text-white`
+                                }`}
+                                title={t.title}
+                              >
+                                {m.icon}
+                              </span>
+                            );
+                          })}
+                          {d.tasks.length > 5 && (
+                            <span className="text-[9px] text-slate-500 px-1">+{d.tasks.length - 5}</span>
+                          )}
+                        </div>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          
+          {/* ARŞİV SEKMESİ */}
+          {planTab === 'archive' && (
+            <div className="space-y-3">
+              {planSelectedDate ? (
+                <>
+                  <div className="bg-violet-950/30 border border-violet-700/30 rounded-xl p-3 flex items-center justify-between">
+                    <div>
+                      <div className="text-xs text-slate-400">Plan</div>
+                      <div className="text-base font-bold text-white">{planSelectedDate}</div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={async () => {
+                          if (confirm(`${planSelectedDate} planını bugüne kopyalansın mı?`)) {
+                            await copyPlanDay(planSelectedDate, todayKey);
+                            setPlanTab('today');
+                          }
+                        }}
+                        className="bg-violet-700 hover:bg-violet-600 text-white text-[11px] font-bold px-3 py-1.5 rounded-lg"
+                      >
+                        📋 Bugüne kopyala
+                      </button>
+                      <button
+                        onClick={() => setPlanSelectedDate('')}
+                        className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] px-3 py-1.5 rounded-lg"
+                      >
+                        ← Geri
+                      </button>
+                    </div>
+                  </div>
+                  {tasksOfDate(planSelectedDate).length === 0 ? (
+                    <div className="text-center py-8 text-slate-500 text-sm">Bu güne ait görev bulunamadı</div>
+                  ) : (
+                    <div className="space-y-2">
+                      {tasksOfDate(planSelectedDate).map((task, idx) => {
+                        const meta = planTaskTypeMeta(task.type);
+                        return (
+                          <div key={task.id} className={`rounded-xl p-3 border ${
+                            task.completed ? 'bg-emerald-950/20 border-emerald-700/30' : 'bg-slate-900/40 border-slate-700/30'
+                          }`}>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${meta.color} text-white`}>
+                                {meta.icon} {task.startTime || `${idx+1}.`}
+                              </span>
+                              <span className="text-[10px] text-slate-400">⏱ {task.durationMin}dk</span>
+                              {task.completed && <span className="text-[10px] text-emerald-300">✓ Tamamlandı</span>}
+                            </div>
+                            <div className={`text-sm font-bold ${task.completed ? 'text-slate-400 line-through' : 'text-white'}`}>
+                              {task.title}
+                            </div>
+                            {task.notes && <div className="text-[11px] text-slate-400 italic mt-1">{task.notes}</div>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  {archiveDates.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-12 text-slate-500">
+                      <div className="text-4xl mb-3">📂</div>
+                      <p className="text-slate-400 text-sm">Henüz arşivde plan yok</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {archiveDates.map(date => {
+                        const dt = tasksOfDate(date);
+                        const completed = dt.filter(t => t.completed).length;
+                        const dateObj = new Date(date);
+                        return (
+                          <button
+                            key={date}
+                            onClick={() => setPlanSelectedDate(date)}
+                            className="w-full text-left bg-slate-900/40 border border-slate-700/30 hover:border-slate-600/50 rounded-xl p-3 transition-all"
+                          >
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <div className="text-sm font-bold text-white">
+                                  {dateObj.toLocaleDateString('tr-TR', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' })}
+                                </div>
+                                <div className="text-[11px] text-slate-400 mt-0.5">
+                                  {completed}/{dt.length} görev — {dt.reduce((s,t)=>s+t.durationMin,0)} dk
+                                </div>
+                              </div>
+                              <div className="text-slate-500">→</div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+          
+          <div className="h-12" />
+        </div>
+      </div>
+    );
+  };
+  
+  // Görev oluşturma/düzenleme modal'ı
+  const renderPlanTaskModal = () => {
+    if (!showPlanTaskModal || !planEditingTask) return null;
+    const t = planEditingTask;
+    const meta = planTaskTypeMeta(t.type);
+    
+    const setT = (patch: Partial<PlanTask>) => setPlanEditingTask({ ...t, ...patch });
+    
+    return (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-3" onClick={() => setShowPlanTaskModal(false)}>
+        <div className="bg-slate-900 border border-slate-700 rounded-t-2xl sm:rounded-2xl w-full max-w-md max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+          <div className="sticky top-0 bg-slate-900 border-b border-slate-800 p-3 flex items-center justify-between z-10">
+            <h2 className="text-base font-bold text-white">{t.title ? '✏️ Görevi Düzenle' : '➕ Yeni Görev'}</h2>
+            <button onClick={() => setShowPlanTaskModal(false)} className="text-slate-400 hover:text-white p-1">
+              <X size={20} />
+            </button>
+          </div>
+          
+          <div className="p-4 space-y-3">
+            {/* Görev tipi */}
+            <div>
+              <label className="block text-xs font-bold text-slate-300 mb-2">Görev Tipi</label>
+              <div className="grid grid-cols-3 gap-1.5">
+                {PLAN_TASK_TYPES.map(pt => (
+                  <button
+                    key={pt.id}
+                    onClick={() => setT({ type: pt.id })}
+                    className={`p-2 rounded-lg text-center transition-all ${
+                      t.type === pt.id ? `${pt.color} text-white shadow-md` : 'bg-slate-800 border border-slate-700 text-slate-400 hover:bg-slate-700'
+                    }`}
+                  >
+                    <div className="text-xl">{pt.icon}</div>
+                    <div className="text-[10px] font-bold mt-0.5">{pt.label}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+            
+            {/* Başlık */}
+            <div>
+              <label className="block text-xs font-bold text-slate-300 mb-1">Başlık <span className="text-rose-400">*</span></label>
+              <input
+                type="text"
+                value={t.title}
+                onChange={e => setT({ title: e.target.value })}
+                placeholder="örn: Tarih - Atatürk İnkılapları"
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                autoFocus
+              />
+            </div>
+            
+            {/* Saat + Süre */}
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-xs font-bold text-slate-300 mb-1">Saat (opsiyonel)</label>
+                <input
+                  type="time"
+                  value={t.startTime || ''}
+                  onChange={e => setT({ startTime: e.target.value || undefined })}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-300 mb-1">Süre (dk)</label>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min={5}
+                  max={300}
+                  value={t.durationMin}
+                  onChange={e => setT({ durationMin: parseInt(e.target.value) || 30 })}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                />
+              </div>
+            </div>
+            <div className="text-[10px] text-slate-500 -mt-1">
+              💡 Sayaç modu otomatik: {(() => {
+                const m = pickStudyModeForTask(t.durationMin);
+                return STUDY_PRESETS.find(p => p.id === m)?.name || m;
+              })()}
+            </div>
+            
+            {/* Konu/Subject */}
+            <div>
+              <label className="block text-xs font-bold text-slate-300 mb-1">Konu/Ders</label>
+              <input
+                type="text"
+                value={t.subject || ''}
+                onChange={e => setT({ subject: e.target.value || undefined })}
+                placeholder="örn: Tarih, Türkçe, Matematik"
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                list="subject-suggestions"
+              />
+              <datalist id="subject-suggestions">
+                {Array.from(new Set(planTasks.map(p => p.subject).filter(Boolean))).map(s => (
+                  <option key={s} value={s} />
+                ))}
+              </datalist>
+            </div>
+            
+            {/* Tipe göre özel alanlar */}
+            {t.type === 'video' && (
+              <div className="bg-rose-950/20 border border-rose-700/30 rounded-lg p-3 space-y-2">
+                <label className="block text-xs font-bold text-rose-300">📺 Video Detayları</label>
+                <input
+                  type="text"
+                  value={t.videoTitle || ''}
+                  onChange={e => setT({ videoTitle: e.target.value || undefined })}
+                  placeholder="Video başlığı"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                />
+                <input
+                  type="url"
+                  value={t.videoUrl || ''}
+                  onChange={e => setT({ videoUrl: e.target.value || undefined })}
+                  placeholder="https://youtube.com/watch?v=..."
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                />
+              </div>
+            )}
+            
+            {t.type === 'questions' && (
+              <div className="bg-amber-950/20 border border-amber-700/30 rounded-lg p-3 space-y-2">
+                <label className="block text-xs font-bold text-amber-300">❓ Soru Detayları</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    value={t.questionCount || ''}
+                    onChange={e => setT({ questionCount: parseInt(e.target.value) || undefined })}
+                    placeholder="Kaç soru"
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                  />
+                  <select
+                    value={t.questionSource || 'kitap'}
+                    onChange={e => setT({ questionSource: e.target.value as any })}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                  >
+                    <option value="kitap">📚 Kitap</option>
+                    <option value="bolum_denemesi">📝 Bölüm Denemesi</option>
+                    <option value="cikmis_soru">⭐ Çıkmış Soru</option>
+                    <option value="deneme_sinavi">🎯 Deneme Sınavı</option>
+                  </select>
+                </div>
+                <input
+                  type="text"
+                  value={t.examName || ''}
+                  onChange={e => setT({ examName: e.target.value || undefined })}
+                  placeholder="Sınav/kaynak adı (örn: ÖSYM 2024)"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                />
+              </div>
+            )}
+            
+            {(t.type === 'study' || t.type === 'review') && (
+              <div className="bg-blue-950/20 border border-blue-700/30 rounded-lg p-3 space-y-2">
+                <label className="block text-xs font-bold text-blue-300">📚 Kaynak Detayları</label>
+                <input
+                  type="text"
+                  value={t.bookName || ''}
+                  onChange={e => setT({ bookName: e.target.value || undefined })}
+                  placeholder="Kitap/kaynak adı"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                />
+                <input
+                  type="text"
+                  value={t.pageRange || ''}
+                  onChange={e => setT({ pageRange: e.target.value || undefined })}
+                  placeholder="Sayfa aralığı (örn: 120-145)"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                />
+              </div>
+            )}
+            
+            {/* Notlar */}
+            <div>
+              <label className="block text-xs font-bold text-slate-300 mb-1">Notlar (opsiyonel)</label>
+              <textarea
+                value={t.notes || ''}
+                onChange={e => setT({ notes: e.target.value || undefined })}
+                placeholder="Özel notlar..."
+                rows={2}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white resize-none"
+              />
+            </div>
+            
+            {/* Tarih (sadece arşivden açıldıysa düzenlenebilir) */}
+            <div>
+              <label className="block text-xs font-bold text-slate-300 mb-1">Tarih</label>
+              <input
+                type="date"
+                value={t.date}
+                onChange={e => setT({ date: e.target.value })}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+              />
+            </div>
+          </div>
+          
+          {/* Footer butonlar */}
+          <div className="sticky bottom-0 bg-slate-900 border-t border-slate-800 p-3 flex gap-2">
+            <button
+              onClick={() => setShowPlanTaskModal(false)}
+              className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-bold py-2 rounded-lg"
+            >
+              İptal
+            </button>
+            <button
+              onClick={async () => {
+                if (!t.title.trim()) {
+                  alert('Lütfen bir başlık gir');
+                  return;
+                }
+                await savePlanTask(t);
+                setShowPlanTaskModal(false);
+                setPlanEditingTask(null);
+              }}
+              className="flex-1 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 text-white text-sm font-bold py-2 rounded-lg"
+            >
+              Kaydet
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+  
   const renderAtolye = () => {
     return (
       <div className="min-h-[100dvh] bg-gradient-to-br from-slate-950 via-purple-950/10 to-slate-950 flex flex-col animate-in fade-in duration-300">
@@ -9295,6 +10237,40 @@ export default function App() {
         </div>
 
         <div className="flex-1 overflow-y-auto p-3 space-y-3">
+          {/* 📅 Aktif plan görevi bandı */}
+          {(() => {
+            if (!activePlanTaskId) return null;
+            const task = planTasks.find(p => p.id === activePlanTaskId);
+            if (!task || task.completed) return null;
+            const meta = planTaskTypeMeta(task.type);
+            return (
+              <div className="bg-gradient-to-r from-blue-950/60 to-indigo-950/40 border border-blue-500/40 rounded-2xl p-3 flex items-center gap-3">
+                <div className={`w-10 h-10 rounded-xl ${meta.color} flex items-center justify-center text-xl flex-shrink-0`}>
+                  {meta.icon}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[10px] text-blue-300 font-bold uppercase tracking-wide">Şu an çalışılan</div>
+                  <div className="text-sm font-bold text-white truncate">{task.title}</div>
+                  <div className="text-[10px] text-slate-400">⏱ {task.durationMin}dk planlandı{task.subject ? ` • ${task.subject}` : ''}</div>
+                </div>
+                <button
+                  onClick={async () => {
+                    if (task.type === 'questions' && task.questionCount) {
+                      const ans = window.prompt(`Kaç tane doğru bildin? (${task.questionCount} sorudan)`, '');
+                      const correct = ans ? parseInt(ans) : 0;
+                      await completePlanTask(task, isNaN(correct) ? 0 : correct);
+                    } else {
+                      await completePlanTask(task);
+                    }
+                  }}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold px-3 py-1.5 rounded-lg flex-shrink-0"
+                >
+                  ✓ Bitti
+                </button>
+              </div>
+            );
+          })()}
+          
           {/* Aktif faz — büyük sayaç */}
           <div className={`rounded-3xl p-6 border-2 transition-all ${
             studyState.phase === 'working' 
@@ -11884,6 +12860,8 @@ export default function App() {
       {mode === 'analiz' && renderAnaliz()}
       {mode === 'calisma' && renderCalisma()}
       {mode === 'atolye' && renderAtolye()}
+      {mode === 'plan' && renderPlan()}
+      {renderPlanTaskModal()}
       {gameModeQuestions && renderGameMode()}
       {renderNoteModal()}
       {renderQuestionCropModal()}

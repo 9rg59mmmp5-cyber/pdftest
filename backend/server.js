@@ -829,6 +829,105 @@ app.post('/pdftest/api/study/set-daily', requireAuth, (req, res) => {
   }
 });
 
+
+// ═════════════════════════════════════════════════════════════════════════
+// 📅 GÜNLÜK PLAN (plan_tasks)
+// ═════════════════════════════════════════════════════════════════════════
+
+// Belirli bir günün görevlerini listele
+app.get('/pdftest/api/plan/tasks', requireAuth, (req, res) => {
+  try {
+    const date = req.query.date;
+    const startDate = req.query.start_date;
+    const endDate = req.query.end_date;
+    
+    let rows;
+    if (date) {
+      rows = db.prepare('SELECT * FROM plan_tasks WHERE uid=? AND date=? ORDER BY order_idx ASC, start_time ASC').all(req.uid, date);
+    } else if (startDate && endDate) {
+      rows = db.prepare('SELECT * FROM plan_tasks WHERE uid=? AND date>=? AND date<=? ORDER BY date ASC, order_idx ASC').all(req.uid, startDate, endDate);
+    } else {
+      // Default: son 30 gün
+      rows = db.prepare("SELECT * FROM plan_tasks WHERE uid=? AND date >= date('now', '-30 days') ORDER BY date DESC, order_idx ASC").all(req.uid);
+    }
+    res.json({ tasks: rows });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Yeni görev oluştur veya güncelle (upsert)
+app.post('/pdftest/api/plan/tasks', requireAuth, (req, res) => {
+  try {
+    const t = req.body || {};
+    if (!t.id || !t.date || !t.type || !t.title) {
+      return res.status(400).json({ error: 'id, date, type, title gerekli' });
+    }
+    const existing = db.prepare('SELECT 1 FROM plan_tasks WHERE id=? AND uid=?').get(t.id, req.uid);
+    if (existing) {
+      db.prepare(`UPDATE plan_tasks SET
+        date=?, type=?, title=?, start_time=?, duration_min=?, subject=?,
+        video_url=?, video_title=?, question_count=?, question_source=?, exam_name=?,
+        book_name=?, page_range=?, pdf_id=?, notes=?,
+        completed=?, completed_at=?, actual_duration_sec=?, correct_count=?, order_idx=?
+        WHERE id=? AND uid=?`).run(
+        t.date, t.type, t.title, t.start_time || null, t.duration_min || 30, t.subject || null,
+        t.video_url || null, t.video_title || null, t.question_count || null, t.question_source || null, t.exam_name || null,
+        t.book_name || null, t.page_range || null, t.pdf_id || null, t.notes || null,
+        t.completed ? 1 : 0, t.completed_at || null, t.actual_duration_sec || null, t.correct_count || null, t.order_idx || 0,
+        t.id, req.uid
+      );
+    } else {
+      db.prepare(`INSERT INTO plan_tasks (
+        id, uid, date, type, title, start_time, duration_min, subject,
+        video_url, video_title, question_count, question_source, exam_name,
+        book_name, page_range, pdf_id, notes,
+        completed, completed_at, actual_duration_sec, correct_count, order_idx, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        t.id, req.uid, t.date, t.type, t.title, t.start_time || null, t.duration_min || 30, t.subject || null,
+        t.video_url || null, t.video_title || null, t.question_count || null, t.question_source || null, t.exam_name || null,
+        t.book_name || null, t.page_range || null, t.pdf_id || null, t.notes || null,
+        t.completed ? 1 : 0, t.completed_at || null, t.actual_duration_sec || null, t.correct_count || null, t.order_idx || 0,
+        t.created_at || Date.now()
+      );
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Görev sil
+app.delete('/pdftest/api/plan/tasks/:id', requireAuth, (req, res) => {
+  try {
+    db.prepare('DELETE FROM plan_tasks WHERE id=? AND uid=?').run(req.params.id, req.uid);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Bir günü başka güne kopyala (template)
+app.post('/pdftest/api/plan/copy', requireAuth, (req, res) => {
+  try {
+    const { from_date, to_date } = req.body;
+    if (!from_date || !to_date) return res.status(400).json({ error: 'from_date ve to_date gerekli' });
+    const tasks = db.prepare('SELECT * FROM plan_tasks WHERE uid=? AND date=?').all(req.uid, from_date);
+    let count = 0;
+    for (const t of tasks) {
+      const newId = require('crypto').randomBytes(8).toString('hex');
+      db.prepare(`INSERT INTO plan_tasks (
+        id, uid, date, type, title, start_time, duration_min, subject,
+        video_url, video_title, question_count, question_source, exam_name,
+        book_name, page_range, pdf_id, notes,
+        completed, completed_at, actual_duration_sec, correct_count, order_idx, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, ?, ?)`).run(
+        newId, req.uid, to_date, t.type, t.title, t.start_time, t.duration_min, t.subject,
+        t.video_url, t.video_title, t.question_count, t.question_source, t.exam_name,
+        t.book_name, t.page_range, t.pdf_id, t.notes,
+        t.order_idx, Date.now()
+      );
+      count++;
+    }
+    res.json({ ok: true, copied: count });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 pdftest backend port ${PORT} | data: ${DATA_DIR}`);
 });

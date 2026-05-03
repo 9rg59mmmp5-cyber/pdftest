@@ -9525,16 +9525,30 @@ export default function App() {
     const setT = (patch: Partial<PlanTask>) => setPlanEditingTask({ ...t, ...patch });
     
     return (
-      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-3" onClick={() => setShowPlanTaskModal(false)}>
-        <div className="bg-slate-900 border border-slate-700 rounded-t-2xl sm:rounded-2xl w-full max-w-md max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-          <div className="sticky top-0 bg-slate-900 border-b border-slate-800 p-3 flex items-center justify-between z-10">
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex flex-col items-center justify-end sm:justify-center p-0 sm:p-3" onClick={() => setShowPlanTaskModal(false)}>
+        <div className="bg-slate-900 border border-slate-700 rounded-t-2xl sm:rounded-2xl w-full max-w-md flex flex-col" 
+             style={{ maxHeight: '90dvh' }}
+             onClick={e => e.stopPropagation()}>
+          {/* HEADER */}
+          <div className="flex-shrink-0 bg-slate-900 border-b border-slate-800 px-3 py-2.5 flex items-center justify-between rounded-t-2xl">
             <h2 className="text-base font-bold text-white">{t.title ? '✏️ Görevi Düzenle' : '➕ Yeni Görev'}</h2>
             <button onClick={() => setShowPlanTaskModal(false)} className="text-slate-400 hover:text-white p-1">
               <X size={20} />
             </button>
           </div>
           
-          <div className="p-4 space-y-3">
+          {/* SCROLLABLE BODY */}
+          <div 
+            className="flex-1 overflow-y-auto p-4 space-y-3"
+            style={{ WebkitOverflowScrolling: 'touch' }}
+            onFocus={(e) => {
+              // Tıklanan input'u göze alıp scroll et
+              const target = e.target as HTMLElement;
+              if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') {
+                setTimeout(() => target.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300);
+              }
+            }}
+          >
             {/* Görev tipi */}
             <div>
               <label className="block text-xs font-bold text-slate-300 mb-2">Görev Tipi</label>
@@ -9563,7 +9577,6 @@ export default function App() {
                 onChange={e => setT({ title: e.target.value })}
                 placeholder="örn: Tarih - Atatürk İnkılapları"
                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
-                autoFocus
               />
             </div>
             
@@ -9715,8 +9728,8 @@ export default function App() {
             </div>
           </div>
           
-          {/* Footer butonlar */}
-          <div className="sticky bottom-0 bg-slate-900 border-t border-slate-800 p-3 flex gap-2">
+          {/* FOOTER butonlar */}
+          <div className="flex-shrink-0 bg-slate-900 border-t border-slate-800 p-3 flex gap-2 rounded-b-2xl">
             <button
               onClick={() => setShowPlanTaskModal(false)}
               className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-bold py-2 rounded-lg"

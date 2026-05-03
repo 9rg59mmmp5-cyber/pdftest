@@ -1777,7 +1777,7 @@ export default function App() {
     }
   };
 
-
+  const startStudyWork = () => {
     studyLastLocalActionRef.current = Date.now();
     const preset = STUDY_PRESETS.find(p => p.id === studyState.mode)!;
     setStudyState(s => ({
